@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>群像 · 画像查看</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <h1>群像</h1>
+        <p class="subtitle">查看已整理的人物画像与群画像</p>
+      </div>
+      <div class="topbar-actions">
+        <span id="counts" class="counts">加载中…</span>
+        <button id="refresh" class="button" type="button">刷新</button>
+      </div>
+    </header>
+
+    <div class="layout">
+      <aside class="sidebar">
+        <input id="search" class="search" type="search" placeholder="搜索群号 / 私聊号 / 平台" />
+        <div id="sessions" class="session-list"></div>
+      </aside>
+      <main id="detail" class="detail">
+        <p class="empty">选择左侧会话查看画像。</p>
+      </main>
+    </div>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,15 @@
+name: portrait
+display_name: 群像
+desc: 按群聊/私聊整理人物与群画像，并提供查询工具。
+short_desc: 按会话维护人物与群画像
+version: v0.1.0
+author: W-Wolfycz
+repo: https://github.com/W-Wolfycz/portrait
+astrbot_version: ">=4.29.0"
+support_platforms:
+  - aiocqhttp
+tags:
+  - 群像
+  - 画像
+  - 记忆
+  - 群聊

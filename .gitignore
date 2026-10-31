@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+venv/
+
+# Runtime data
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.jsonl
+
+# Build / local artifacts
+dist/
+build/
+*.zip
+*.log
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

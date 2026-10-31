@@ -1,0 +1,128 @@
+{
+  "log_with_bot_id": {
+    "description": "日志区分机器人实例",
+    "type": "bool",
+    "default": true,
+    "hint": "启用后工具/命令日志前缀附加 platform_id；扫描器日志只保留模块名。"
+  },
+  "llm_provider": {
+    "description": "画像任务模型",
+    "type": "string",
+    "default": "",
+    "_special": "select_provider",
+    "hint": "萃取、合并、查询工具共用这一个 provider；留空则跟随默认对话模型。"
+  },
+  "extract_threshold": {
+    "description": "片段阈值（文本消息数）",
+    "type": "int",
+    "default": 50,
+    "hint": "一个会话累计到这么多条含 text 的消息后，截成一个片段做萃取。默认 50。"
+  },
+  "initial_cursor": {
+    "description": "首次扫描起点",
+    "type": "string",
+    "default": "latest",
+    "options": ["latest", "oldest"],
+    "labels": ["只处理新消息", "回填历史"],
+    "hint": "只对新建的会话游标生效：latest 从启用后的新消息开始；oldest 从该会话最早的历史消息开始回填。"
+  },
+  "flush_min_units": {
+    "description": "每日兜底最小条数",
+    "type": "int",
+    "default": 10,
+    "hint": "到 flush_time 时，如果会话还没到 extract_threshold，但至少有这么多条，也做一次兜底片段。"
+  },
+  "flush_time": {
+    "description": "每日兜底萃取时间",
+    "type": "string",
+    "default": "04:00",
+    "hint": "每天到这个时间后，对未到 extract_threshold 但达到最小条数的低活跃会话做一次兜底萃取。格式 HH:MM；与 merge_time 独立。"
+  },
+  "merge_time": {
+    "description": "每日画像合并时间",
+    "type": "string",
+    "default": "04:00",
+    "hint": "每天到这个时间后，把待合并片段合并进画像。格式 HH:MM；与 flush_time 独立。"
+  },
+  "tick_seconds": {
+    "description": "扫描间隔（秒）",
+    "type": "int",
+    "default": 60,
+    "hint": "扫描器基础间隔。智能扫描开启时这是上限，可能被自动缩短。"
+  },
+  "smart_scan": {
+    "description": "智能扫描",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后：一轮扫描有积压（>1 片段）时间隔缩短 5%，恰好 1 个片段不变，空闲时放大 5%，最多回到 tick_seconds；关闭则固定 tick_seconds。"
+  },
+  "max_segments_per_scan": {
+    "description": "每轮最多萃取片段数",
+    "type": "int",
+    "default": 20,
+    "hint": "定时器每轮到点后，所有会话合计最多萃取多少个片段。总消息数上限不超过 片段阈值 * 片段数"
+  },
+  "max_segments_per_merge": {
+    "description": "合并批次容量（片段数）",
+    "type": "int",
+    "default": 0,
+    "hint": "一次中间批最多放多少个片段摘要。0 = 不分批，全部片段直接进最终群画像合并；>0 = 按容量分中间批，再把中间批汇总成最终群画像。人物画像仍每个角色只合并一次。"
+  },
+  "segment_ttl_days": {
+    "description": "未消费片段保留天数",
+    "type": "int",
+    "default": 7,
+    "hint": "待合并片段超过这么多天仍未合并，会被直接删除，不会进入第二轮合并；0 表示不自动清理。"
+  },
+  "enable_group_profile": {
+    "description": "群画像",
+    "type": "bool",
+    "default": true,
+    "hint": "仅群聊生效；私聊没有群画像。"
+  },
+  "enable_person_profile": {
+    "description": "人物画像",
+    "type": "bool",
+    "default": true,
+    "hint": "分群建档：按 (session, sender_id) 分别建档。"
+  },
+  "blacklist_sessions": {
+    "description": "画像黑名单",
+    "type": "list",
+    "default": [],
+    "items": {
+      "type": "string"
+    },
+    "hint": "G:群号 或 F:私聊号"
+  },
+  "llm_max_concurrency": {
+    "description": "LLM 并发上限",
+    "type": "int",
+    "default": 4,
+    "hint": "所有可并发 LLM 调用的全局上限：多 session 萃取、片段/画像合并、查询共用；1 = 串行。"
+  },
+  "failure_advance_after": {
+    "description": "连续失败推进阈值",
+    "type": "int",
+    "default": 3,
+    "hint": "普通失败连续多少次后，按下面的推进量跳过；0 = 普通失败不跳过，政策拒绝仍立即跳过。"
+  },
+  "extract_refusal_advance_messages": {
+    "description": "萃取推进消息数",
+    "type": "int",
+    "default": 5,
+    "hint": "萃取被政策拒绝，或连续失败达到阈值时，游标向前跳过多少条 text 消息；0 = 不跳过。"
+  },
+  "merge_refusal_advance_segments": {
+    "description": "合并跳过片段数",
+    "type": "int",
+    "default": 5,
+    "hint": "合并被政策拒绝，或连续失败达到阈值时，跳过多少个待合并片段；0 = 不跳过。"
+  },
+  "llm_timeout_seconds": {
+    "description": "LLM 超时（秒）",
+    "type": "int",
+    "default": 120,
+    "hint": "单次萃取/合并/查询的超时；失败不推进游标，下轮重试。"
+  }
+}
