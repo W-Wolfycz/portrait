@@ -320,7 +320,7 @@ class PortraitPlugin(Star):
             return error_response("profile 必须是对象")
         profile = coerce_profile(raw_profile, kind)
         catalog = await self._catalog_for(session)
-        profile = encode_profile(profile, catalog)
+        profile = encode_profile(profile, catalog, plain_names=True)
         store = self.runtime.store
         if kind == "group":
             store.save_profile_session(session, profile)

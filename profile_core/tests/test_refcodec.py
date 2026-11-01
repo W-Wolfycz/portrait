@@ -40,6 +40,24 @@ def test_encode_labels_and_p_refs_to_tokens() -> None:
     assert encoded["persons"][0]["speaker"] == "P1"
 
 
+def test_manual_plain_nickname_is_tokenized_only_when_unique() -> None:
+    unique = RefCatalog([("1", "小明"), ("2", "小红")])
+    encoded = encode_profile(
+        {"long": {"relations": "和小明关系很好"}},
+        unique,
+        plain_names=True,
+    )
+    assert encoded["long"]["relations"] == f"和{make_token('1')}关系很好"
+
+    ambiguous = RefCatalog([("1", "小明"), ("2", "小明")])
+    encoded = encode_profile(
+        {"long": {"relations": "和小明关系很好"}},
+        ambiguous,
+        plain_names=True,
+    )
+    assert encoded["long"]["relations"] == "和小明关系很好"
+
+
 def test_render_profile_hides_tokens_from_llm_and_ui() -> None:
     catalog = RefCatalog([("1", "小明")])
     profile = {"mid": {"relations": f"与{make_token('1')}关系好"}}

@@ -748,10 +748,15 @@ async function saveEditor() {
   }
   $("editor-save").disabled = true;
   $("editor-hint").textContent = "保存中…";
+  const editing = state.editing;
   try {
     await bridge.apiPost("update-profile", payload);
     closeEditor();
-    await selectSession(state.selected);
+    await selectSession(state.selected, {
+      keepView: true,
+      focusPerson:
+        editing?.kind === "person" ? editing.person?.sender_id || "" : "",
+    });
   } catch (error) {
     $("editor-hint").textContent = `保存失败：${error.message || error}`;
   } finally {
@@ -799,13 +804,13 @@ function renderSessions() {
     const row = el("div", "session-row");
     const content = el("div", "session-main");
     const title = el("div", "session-title");
-    title.append(
-      el(
-        "span",
-        null,
-        item.display_name || typeLabel(item.message_type)
-      )
+    const nameNode = el(
+      "span",
+      "session-name",
+      item.display_name || typeLabel(item.message_type)
     );
+    nameNode.title = item.display_name || typeLabel(item.message_type);
+    title.append(nameNode);
     title.append(el("span", "badge", `${item.persons?.length || 0} 人`));
     if (Number(item.unextracted || 0) > 0) {
       title.append(
@@ -863,10 +868,12 @@ function renderStatus(data) {
   $("stats").textContent = parts.join(" · ");
 }
 
-async function selectSession(session) {
+async function selectSession(session, { keepView = false, focusPerson = "" } = {}) {
   state.selected = session;
-  state.tab = "group";
-  state.personQuery = "";
+  if (!keepView) {
+    state.tab = "group";
+    state.personQuery = "";
+  }
   renderSessions();
   const detail = $("detail");
   detail.replaceChildren(el("p", "empty", "加载中…"));
@@ -875,6 +882,12 @@ async function selectSession(session) {
     state.data = data;
     if (data.message_type !== "GroupMessage") state.tab = "persons";
     renderDetail(data);
+    if (focusPerson) {
+      const person = (data.persons || []).find(
+        (item) => item.sender_id === focusPerson
+      );
+      if (person) openPerson(person);
+    }
   } catch (error) {
     detail.replaceChildren(
       el("div", "notice", `读取画像失败：${error.message || error}`)

@@ -48,6 +48,7 @@ class RefCatalog:
         self._names = names
         self._labels: dict[str, str] = {}
         self._label_to_id: dict[str, str] = {}
+        self._plain_name_to_id: dict[str, str] = {}
         for same_name in grouped.values():
             same_name = sorted(same_name)
             for index, sender_id in enumerate(same_name, 1):
@@ -57,6 +58,13 @@ class RefCatalog:
                 self._label_to_id[label] = sender_id
                 if len(same_name) == 1:
                     self._label_to_id[base] = sender_id
+                    if (
+                        base != UNKNOWN_NAME
+                        and not base.isdigit()
+                        and len(base) >= 2
+                        and "#" not in base
+                    ):
+                        self._plain_name_to_id[base] = sender_id
 
     def label(self, sender_id: str) -> str:
         key = str(sender_id or "").strip()
@@ -107,6 +115,7 @@ class RefCatalog:
         text: str,
         *,
         speaker_map: dict[str, str] | None = None,
+        plain_names: bool = False,
     ) -> str:
         if not isinstance(text, str) or not text:
             return text
@@ -122,28 +131,51 @@ class RefCatalog:
             sender_id = self.resolve(match.group(1))
             return make_token(sender_id) if sender_id else match.group(1)
 
-        return LABEL_RE.sub(label_ref, text)
+        text = LABEL_RE.sub(label_ref, text)
+        if plain_names and self._plain_name_to_id:
+            for name in sorted(
+                self._plain_name_to_id, key=len, reverse=True
+            ):
+                text = re.sub(
+                    re.escape(name),
+                    make_token(self._plain_name_to_id[name]),
+                    text,
+                )
+        return text
 
     def encode_value(
         self,
         value: Any,
         *,
         speaker_map: dict[str, str] | None = None,
+        plain_names: bool = False,
     ) -> Any:
         if isinstance(value, str):
-            return self.encode(value, speaker_map=speaker_map)
+            return self.encode(
+                value,
+                speaker_map=speaker_map,
+                plain_names=plain_names,
+            )
         if isinstance(value, dict):
             return {
                 key: (
                     item
                     if key == "speaker"
-                    else self.encode_value(item, speaker_map=speaker_map)
+                    else self.encode_value(
+                        item,
+                        speaker_map=speaker_map,
+                        plain_names=plain_names,
+                    )
                 )
                 for key, item in value.items()
             }
         if isinstance(value, list):
             return [
-                self.encode_value(item, speaker_map=speaker_map)
+                self.encode_value(
+                    item,
+                    speaker_map=speaker_map,
+                    plain_names=plain_names,
+                )
                 for item in value
             ]
         return value
@@ -173,5 +205,10 @@ def encode_profile(
     catalog: RefCatalog,
     *,
     speaker_map: dict[str, str] | None = None,
+    plain_names: bool = False,
 ) -> dict[str, Any]:
-    return catalog.encode_value(profile or {}, speaker_map=speaker_map)
+    return catalog.encode_value(
+        profile or {},
+        speaker_map=speaker_map,
+        plain_names=plain_names,
+    )
