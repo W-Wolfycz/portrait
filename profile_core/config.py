@@ -76,6 +76,8 @@ class Settings:
     extract_threshold: int = 50
     #: 新会话首次扫描的起点：latest=只处理启用后的新消息，oldest=回填历史。
     initial_cursor: str = "latest"
+    #: 同一片段萃取失败后立即重试的次数；0=只等下一轮扫描。
+    extract_retry_attempts: int = 1
     flush_min_units: int = 10
     #: 每日低活跃片段萃取时间；与每日画像合并分开配置。
     flush_time: str = DEFAULT_TIME
@@ -114,6 +116,9 @@ class Settings:
             ),
             initial_cursor=_as_choice(
                 data.get("initial_cursor"), "latest", ("latest", "oldest")
+            ),
+            extract_retry_attempts=_as_int(
+                data.get("extract_retry_attempts"), 1, minimum=0
             ),
             flush_min_units=_as_int(data.get("flush_min_units"), 10, minimum=1),
             flush_time=_as_text(data.get("flush_time"), DEFAULT_TIME),

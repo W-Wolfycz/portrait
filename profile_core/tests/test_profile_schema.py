@@ -27,6 +27,14 @@ def test_flat_group_profile_is_wrapped_into_tiers() -> None:
     }
 
 
+def test_custom_fields_are_capped_at_thirty_two() -> None:
+    raw = {
+        "long": {f"custom_{index}": "x" for index in range(40)},
+    }
+    result = coerce_profile(raw, "person")
+    assert len(result["long"]) == 32
+
+
 def test_custom_fields_are_kept_and_invalid_keys_dropped() -> None:
     assert coerce_profile(
         {

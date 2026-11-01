@@ -19,7 +19,7 @@ GROUP_TIERS: dict[str, tuple[str, ...]] = {
 }
 PERSON_LIMIT = 80
 GROUP_LIMIT = 100
-MAX_FIELDS_PER_TIER = 12
+MAX_FIELDS_PER_TIER = 32
 
 _FIELD_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 _WHITESPACE_RE = re.compile(r"\s+")

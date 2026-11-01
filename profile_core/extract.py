@@ -10,6 +10,7 @@ from .llm import LlmClient, LlmError
 from .policy import is_policy_refusal
 from .profile_schema import PERSON_LIMIT, clean_text, coerce_profile
 from .prompts import EXTRACT_SYSTEM_PROMPT, build_extract_prompt
+from .refcodec import RefCatalog, encode_profile, speaker_map_of
 
 MAX_PERSONS = 8
 MAX_MENTIONED = 5
@@ -86,7 +87,14 @@ def parse_extraction(
     """解析并校验 LLM JSON；返回 (summary, dropped, error)。"""
     payload = loads_json_object(text)
     if payload is None:
-        return _empty_summary(), 0, "JSON 解析失败"
+        stripped = text.strip()
+        if not stripped:
+            error = "模型返回为空"
+        elif "{" not in stripped or "}" not in stripped:
+            error = f"JSON 解析失败（无完整对象，长度 {len(stripped)}）"
+        else:
+            error = f"JSON 解析失败（格式错误，长度 {len(stripped)}）"
+        return _empty_summary(), 0, error
 
     speaker_map = {speaker.label: speaker for speaker in rendered.speakers}
     raw_persons = payload.get("persons")
@@ -107,8 +115,22 @@ def parse_extraction(
         group = coerce_profile(payload.get("group"), "group")
 
     mentioned = _normalize_mentioned(payload.get("mentioned"))
+    summary = {
+        "persons": persons,
+        "group": group,
+        "mentioned": mentioned,
+    }
+    catalog = RefCatalog(
+        (speaker.sender_id, speaker.latest_name)
+        for speaker in rendered.speakers
+    )
+    summary = encode_profile(
+        summary,
+        catalog,
+        speaker_map=speaker_map_of(rendered.speakers),
+    )
     return (
-        {"persons": persons, "group": group, "mentioned": mentioned},
+        summary,
         dropped,
         "",
     )

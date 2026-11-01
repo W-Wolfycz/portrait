@@ -426,6 +426,14 @@ class ProfileStore:
         rows = self._connection.execute(sql, params).fetchall()
         return [self._to_segment(row) for row in rows]
 
+    def pending_count(self, session: SessionKey) -> int:
+        row = self._connection.execute(
+            "SELECT COUNT(*) FROM segment "
+            "WHERE session_key = ? AND consumed_at IS NULL",
+            (session.key,),
+        ).fetchone()
+        return int(row[0] if row else 0)
+
     def mark_consumed(
         self,
         segment_ids: Iterable[str],
@@ -528,6 +536,51 @@ class ProfileStore:
             (session.key, str(sender_id)),
         ).fetchone()
         return _json_object(row["payload_json"]) if row else None
+
+    def save_profile_session(
+        self,
+        session: SessionKey,
+        payload: dict[str, Any],
+    ) -> None:
+        now = utc_now_iso()
+        self._connection.execute(
+            "INSERT INTO profile_session (session_key, payload_json, updated_at) "
+            "VALUES (?, ?, ?) "
+            "ON CONFLICT(session_key) DO UPDATE SET "
+            "payload_json = excluded.payload_json, updated_at = excluded.updated_at",
+            (
+                session.key,
+                json.dumps(payload, ensure_ascii=False, sort_keys=True),
+                now,
+            ),
+        )
+        self._connection.commit()
+
+    def save_profile_person(
+        self,
+        session: SessionKey,
+        sender_id: str,
+        display_name: str,
+        payload: dict[str, Any],
+    ) -> None:
+        now = utc_now_iso()
+        sender_id = str(sender_id).strip()
+        self._connection.execute(
+            "INSERT INTO profile_person "
+            "(session_key, sender_id, display_name, payload_json, updated_at) "
+            "VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(session_key, sender_id) DO UPDATE SET "
+            "display_name = excluded.display_name, "
+            "payload_json = excluded.payload_json, updated_at = excluded.updated_at",
+            (
+                session.key,
+                sender_id,
+                str(display_name or ""),
+                json.dumps(payload, ensure_ascii=False, sort_keys=True),
+                now,
+            ),
+        )
+        self._connection.commit()
 
     def sessions_with_pending(self) -> list[SessionKey]:
         rows = self._connection.execute(

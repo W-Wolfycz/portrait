@@ -13,6 +13,7 @@ from .nickname import (
 )
 from .prompts import TOOL_SYSTEM_PROMPT, build_tool_prompt
 from .qqdir import QQMemberDirectory
+from .refcodec import RefCatalog, render_profile
 from .runtime import Runtime
 
 
@@ -21,6 +22,10 @@ class PortraitTool:
         self._runtime = runtime
         self._logger = logger
         self._directories: dict[str, QQMemberDirectory] = {}
+
+    def _catalog(self, session: SessionKey) -> RefCatalog:
+        assert self._runtime.store is not None
+        return RefCatalog(self._runtime.store.list_profile_persons(session))
 
     async def query(
         self,
@@ -59,8 +64,12 @@ class PortraitTool:
             payload = runtime.store.get_profile_session(session)
             if not payload:
                 return "暂无记录"
+            catalog = self._catalog(session)
             return await self._answer(
-                payload, ask, is_group=True, target_name=""
+                render_profile(payload, catalog, for_llm=True),
+                ask,
+                is_group=True,
+                target_name="",
             )
 
         raw_target = (target or "").strip() or str(event.get_sender_id())
@@ -81,8 +90,9 @@ class PortraitTool:
         payload = runtime.store.get_profile_person(session, person.sender_id)
         if not payload:
             return "暂无记录"
+        catalog = self._catalog(session)
         return await self._answer(
-            payload,
+            render_profile(payload, catalog, for_llm=True),
             ask,
             is_group=False,
             target_name=person.display_name or person.sender_id,

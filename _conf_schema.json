@@ -26,6 +26,12 @@
     "labels": ["只处理新消息", "回填历史"],
     "hint": "只对新建的会话游标生效：latest 从启用后的新消息开始；oldest 从该会话最早的历史消息开始回填。"
   },
+  "extract_retry_attempts": {
+    "description": "萃取失败立即重试次数",
+    "type": "int",
+    "default": 1,
+    "hint": "同一片段萃取失败后立即重试的次数；0 = 不立即重试，等下一轮扫描。重试仍失败才计入连续失败。"
+  },
   "flush_min_units": {
     "description": "每日兜底最小条数",
     "type": "int",

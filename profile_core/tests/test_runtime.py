@@ -211,6 +211,71 @@ def test_merge_repeated_failures_skip_pending(tmp_path: Path) -> None:
 
     asyncio.run(scenario())
 
+def test_backlog_counts_unprocessed_messages(tmp_path: Path) -> None:
+    _make_cm(tmp_path / "cm.db")
+    runtime = Runtime(
+        None,
+        _settings(tmp_path),
+        logger=logging.getLogger("test"),
+        data_dir=str(tmp_path),
+        llm=ScriptedLlm(
+            [json.dumps({"persons": [], "group": {}, "mentioned": []})]
+        ),
+        cm_db_path=str(tmp_path / "cm.db"),
+        profile_db_path=str(tmp_path / "profile.db"),
+    )
+
+    async def scenario() -> None:
+        await runtime.start(auto_loop=False)
+        assert runtime._backlog() == (1, 3, 0)
+        await runtime.scan_now()
+        assert runtime._backlog() == (1, 1, 1)
+        await runtime.stop()
+
+    asyncio.run(scenario())
+
+
+def test_extraction_retries_failed_json_immediately(tmp_path: Path) -> None:
+    _make_cm(tmp_path / "cm.db")
+    llm = ScriptedLlm(
+        [
+            "not json",
+            json.dumps(
+                {
+                    "persons": [
+                        {
+                            "speaker": "P1",
+                            "name": "A",
+                            "sections": {"identity": "在杭州"},
+                        }
+                    ],
+                    "group": {"theme": "技术"},
+                    "mentioned": [],
+                },
+                ensure_ascii=False,
+            ),
+        ]
+    )
+    runtime = Runtime(
+        None,
+        _settings(tmp_path),
+        logger=logging.getLogger("test"),
+        data_dir=str(tmp_path),
+        llm=llm,
+        cm_db_path=str(tmp_path / "cm.db"),
+        profile_db_path=str(tmp_path / "profile.db"),
+    )
+
+    async def scenario() -> None:
+        await runtime.start(auto_loop=False)
+        await runtime.scan_now()
+        assert runtime.store.profile_counts()["pending_segments"] == 1
+        await runtime.stop()
+
+    asyncio.run(scenario())
+    assert len(llm.prompts) == 2
+
+
 def test_initial_cursor_latest_skips_history(tmp_path: Path) -> None:
     _make_cm(tmp_path / "cm.db")
     llm = ScriptedLlm([])

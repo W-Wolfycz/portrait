@@ -14,6 +14,7 @@ from .extract import SegmentExtractor
 from .llm import AstrBotLlmClient, LlmClient, LlmError
 from .merge import MergeError, ProfileMerger
 from .policy import is_policy_refusal
+from .refcodec import RefCatalog, encode_profile, render_profile
 from .render import RenderOptions, render_segment
 from .source import V2Source
 from .store import ProfileStore, detect_reset, utc_now_iso
@@ -189,11 +190,48 @@ class Runtime:
         elif processed == 0:
             self._interval = min(self._max_interval, self._interval * 1.05)
         if abs(self._interval - before) > 0.05:
+            remaining_sessions, remaining_messages, pending = self._backlog()
             self._log(
                 "DEBUG",
                 f"扫描间隔 {before:.1f}s -> {self._interval:.1f}s "
-                f"(processed={processed})",
+                f"(processed={processed}, remaining_sessions={remaining_sessions}, "
+                f"remaining_msgs={remaining_messages}, pending={pending})",
             )
+
+    def _backlog(self) -> tuple[int, int, int]:
+        """返回还有新消息的 session 数、待推进消息数、待合并片段数。"""
+        if self.source is None or self.store is None:
+            return 0, 0, 0
+        sessions = 0
+        messages = 0
+        for session in self.source.list_sessions():
+            if self.settings.is_blacklisted(session):
+                continue
+            gap = self.unextracted_messages(session)
+            if gap > 0:
+                sessions += 1
+                messages += gap
+        pending = self.store.profile_counts().get("pending_segments", 0)
+        return sessions, messages, pending
+
+    def unextracted_messages(self, session: SessionKey) -> int:
+        """当前 session 游标之后、尚未萃取的消息数（CM seq 口径）。"""
+        if self.source is None or self.store is None:
+            return 0
+        max_seq = self.source.max_seq(session)
+        cursor = self.store.get_cursor(session)
+        return max(0, max_seq - (cursor.seq if cursor else 0))
+
+    def current_sender_name(
+        self, session: SessionKey, sender_id: str
+    ) -> str:
+        """只查当前会话 CM 历史昵称，不做跨会话填充。"""
+        if self.source is None:
+            return ""
+        for name in self.source.sender_names(session, sender_id):
+            if name and not name.isdigit():
+                return name
+        return ""
 
     def _resolve_timezone(self):
         """跟随 AstrBot 主配置；缺失/非法静默回退 UTC。"""
@@ -237,6 +275,12 @@ class Runtime:
             for session in self.source.list_sessions()
             if not self.settings.is_blacklisted(session)
         ]
+        if self.settings.failure_advance_after > 0:
+            active.sort(
+                key=lambda item: 0
+                if self._extract_failures.get(item.key)
+                else 1
+            )
         while active and processed < self.settings.max_segments_per_scan:
             budget = self.settings.max_segments_per_scan - processed
             batch = active[:budget]
@@ -448,6 +492,18 @@ class Runtime:
         result = await self.extractor.extract(
             session, rendered, started_at=started_at, ended_at=ended_at
         )
+        retry_attempts = max(0, self.settings.extract_retry_attempts)
+        retry = 0
+        while result.status == "failed" and retry < retry_attempts:
+            retry += 1
+            self._log(
+                "WARNING",
+                f"萃取失败 session={session.key} reason={result.error}，"
+                f"立即重试 {retry}/{retry_attempts}",
+            )
+            result = await self.extractor.extract(
+                session, rendered, started_at=started_at, ended_at=ended_at
+            )
         if result.status == "refused":
             advanced = self._advance_extract_cursor(
                 session, plan, "extract_refused"
@@ -479,7 +535,8 @@ class Runtime:
                     return True
             self._log(
                 "WARNING",
-                f"萃取失败 session={session.key} reason={result.error}",
+                f"萃取失败 session={session.key} reason={result.error}，"
+                "连续失败计数保留，下一次扫描优先重试",
             )
             return False
 
@@ -660,6 +717,28 @@ class Runtime:
             )
             return True
 
+    def _ref_catalog(
+        self,
+        session: SessionKey,
+        summaries: list[dict[str, Any]],
+    ) -> RefCatalog:
+        assert self.store is not None
+        entries: list[tuple[str, str]] = []
+        for sender_id, name in self.store.list_profile_persons(session):
+            entries.append((sender_id, name))
+        for summary in summaries:
+            persons = summary.get("persons")
+            if not isinstance(persons, list):
+                continue
+            for person in persons:
+                if not isinstance(person, dict):
+                    continue
+                sender_id = str(person.get("sender_id") or "").strip()
+                name = str(person.get("name") or "").strip()
+                if sender_id:
+                    entries.append((sender_id, name))
+        return RefCatalog(entries)
+
     async def _merge_group(
         self,
         session: SessionKey,
@@ -671,16 +750,23 @@ class Runtime:
         if session.message_type != "GroupMessage":
             return None
         previous = self.store.get_profile_session(session)
+        catalog = self._ref_catalog(session, summaries)
         batch_size = self.settings.max_segments_per_merge
         if batch_size <= 0 or len(summaries) <= batch_size:
             fragments = [
-                item["group"]
+                render_profile(item["group"], catalog, for_llm=True)
                 for item in summaries
                 if isinstance(item.get("group"), dict) and item["group"]
             ]
             if not fragments:
                 return None
-            return await self.merger.merge_group(previous, fragments)
+            previous_llm = (
+                render_profile(previous, catalog, for_llm=True)
+                if previous
+                else None
+            )
+            merged = await self.merger.merge_group(previous_llm, fragments)
+            return encode_profile(merged, catalog)
 
         chunks = [
             summaries[index : index + batch_size]
@@ -689,7 +775,7 @@ class Runtime:
 
         def fragments_of(chunk: list[dict[str, Any]]) -> list[dict[str, Any]]:
             return [
-                item["group"]
+                render_profile(item["group"], catalog, for_llm=True)
                 for item in chunk
                 if isinstance(item.get("group"), dict) and item["group"]
             ]
@@ -700,7 +786,8 @@ class Runtime:
             fragments = fragments_of(chunk)
             if not fragments:
                 return None
-            return await self.merger.merge_group(None, fragments)
+            merged = await self.merger.merge_group(None, fragments)
+            return encode_profile(merged, catalog)
 
         batch_profiles = [
             item
@@ -709,7 +796,17 @@ class Runtime:
         ]
         if not batch_profiles:
             return None
-        return await self.merger.merge_group(previous, batch_profiles)
+        previous_llm = (
+            render_profile(previous, catalog, for_llm=True)
+            if previous
+            else None
+        )
+        final_fragments = [
+            render_profile(item, catalog, for_llm=True)
+            for item in batch_profiles
+        ]
+        merged = await self.merger.merge_group(previous_llm, final_fragments)
+        return encode_profile(merged, catalog)
 
     async def _merge_persons(
         self,
@@ -719,6 +816,7 @@ class Runtime:
         assert self.merger is not None
         if not self.settings.enable_person_profile:
             return []
+        catalog = self._ref_catalog(session, summaries)
         grouped: dict[str, dict[str, Any]] = {}
         for summary in summaries:
             persons = summary.get("persons")
@@ -741,10 +839,21 @@ class Runtime:
             sender_id: str, entry: dict[str, Any]
         ) -> tuple[str, str, dict[str, Any]]:
             previous = self.store.get_profile_person(session, sender_id)
-            payload = await self.merger.merge_person(
-                previous, entry["fragments"], entry["name"]
+            previous_llm = (
+                render_profile(previous, catalog, for_llm=True)
+                if previous
+                else None
             )
-            return sender_id, entry["name"], payload
+            name = catalog.name(sender_id) or entry["name"]
+            fragments = [
+                render_profile(item, catalog, for_llm=True)
+                for item in entry["fragments"]
+            ]
+            payload = await self.merger.merge_person(
+                previous_llm, fragments, name
+            )
+            payload = encode_profile(payload, catalog)
+            return sender_id, name, payload
 
         return list(
             await asyncio.gather(

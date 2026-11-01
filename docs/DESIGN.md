@@ -39,6 +39,7 @@
 | D18 | **默认群画像 1 次、人物每个角色 1 次**；`max_segments_per_merge>0` 时可选“片段进中间批”的容量 |
 | D19 | 昵称 → `sender_id` 的模糊解析**交给 QQ 群成员目录**（`get_group_member_list`）；非 aiocqhttp/目录失败时用本地兜底 |
 | D20 | **所有可并发的 LLM 调用并行**：多 session 萃取、群/人物合并、查询；全局上限 `llm_max_concurrency` |
+| D21 | **引用编解码**：DB 存 `{{uid}}` token；LLM/UI 渲染昵称；同名给 LLM 加 `#n`，UI 不显示后缀 |
 
 ---
 
@@ -213,6 +214,22 @@ CREATE TABLE segment (
 | 10 片段/天 | 15–30k 字符 ≈ 45–90 KB |
 | 合并上下文 | 10–20k token/会话 |
 | 合并后 | 标记消费，按 TTL 清理，稳态约 1 天量 |
+
+### 4.5 人物引用编解码
+
+画像正文中的“与某人关系好”需要绑定稳定身份，而不是绑定昵称：
+
+```text
+DB：与 {{uid:123456}} 关系好
+LLM：与「小明#1」关系好
+UI：与小明关系好
+```
+
+- 写入：片段内 `P#` 用该片段的 speaker map 转 token；模型输出的 `「昵称」` 只在目录唯一时转 token；
+- 读取：统一 `render_profile(..., for_llm=True/False)`，UI 不带 `#n`；
+- 同名：LLM 目录按 `sender_id` 稳定分配 `#1/#2`，UI 用头像/QQ 号区分；
+- 反解：只接受精确标签；同名无后缀或未知标签不猜；
+- 旧画像已是昵称/P#，没有 token，不能可靠反解；需要重新萃取。
 
 ---
 
@@ -521,7 +538,7 @@ class NicknameResolver(Protocol):
 
 | 场景 | 行为 |
 | --- | --- |
-| 萃取失败（超时/JSON 坏） | 不写片段、不推进游标；连续达到 `failure_advance_after` 后按拒绝推进量跳过 |
+| 萃取失败（超时/JSON 坏） | 先立即重试 `extract_retry_attempts` 次；仍失败则不写片段、不推进游标，下一轮扫描优先重试；连续达到 `failure_advance_after` 后按拒绝推进量跳过 |
 | 萃取被内容安全/政策拒绝 | 游标推进 `extract_refusal_advance_messages` 条 text，继续下一段 |
 | 合并失败 | 回滚；旧画像保留；片段不消费；连续达到 `failure_advance_after` 后跳过片段；每天最多自动重试 3 次 |
 | 合并被内容安全/政策拒绝 | 跳过 `merge_refusal_advance_segments` 个 pending 片段，继续下一批 |
@@ -540,6 +557,7 @@ class NicknameResolver(Protocol):
 llm_provider               ""        萃取/合并/tool 共用一个
 extract_threshold          50        文本消息阈值
 initial_cursor             latest    新游标起点：latest=MAX(seq)；oldest=0
+extract_retry_attempts     1         同一片段失败后立即重试次数
 flush_min_units            10        每日低活跃片段最小条数
 flush_time                 "04:00"   每日低活跃片段萃取时间，HH:MM
 merge_time                 "04:00"   每日画像合并时间，HH:MM
@@ -584,7 +602,7 @@ log_with_bot_id            true
 
 - 插件入口：`main.py`（后台扫描器 + `portrait_query` tool + `portrait status/merge/scan` 命令）；
 - `profile_core/`：`contracts/source/identity/render/segment/nickname/store/extract/merge/llm/prompts/runtime/tool/qqdir/config`；
-- 测试 **94 passed**（读取/渲染/P#/片段/游标/萃取/合并/工具/运行时/上下文补齐/LLM 适配/自适应调度）；
+- 测试 **103 passed**（读取/渲染/P#/片段/游标/萃取/合并/工具/运行时/上下文补齐/LLM 适配/自适应调度）；
 - 现网库只读验收：500 条渲染、零 `⟦CM_*⟧`、P# 一致、纯图不进片段；
 - 已部署到 `data/plugins/portrait`（不含 docs/tests/cm_pipeline）；
 - 未做：真实 provider 的部署端冒烟（需要 reload 后由用户操作）。

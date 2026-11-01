@@ -9,6 +9,7 @@ from datetime import timezone
 from profile_core.contracts import SessionKey
 from profile_core.extract import SegmentExtractor
 from profile_core.llm import LlmResult
+from profile_core.refcodec import make_token
 from profile_core.render import RenderOptions, render_segment
 
 from ._helpers import message
@@ -101,9 +102,35 @@ def test_empty_payload_is_empty_status() -> None:
     assert result.status == "empty"
 
 
+def test_relations_encode_p_labels_as_tokens() -> None:
+    result = _run(
+        GROUP,
+        {
+            "persons": [
+                {
+                    "speaker": "P1",
+                    "name": "小明",
+                    "sections": {"relations": "与 P2 关系好"},
+                }
+            ],
+            "group": {"relations": "P1 和 P2 常一起出现"},
+        },
+    )
+    assert result.status == "success"
+    assert (
+        result.summary["persons"][0]["sections"]["mid"]["relations"]
+        == f"与 {make_token('10002')} 关系好"
+    )
+    assert (
+        result.summary["group"]["mid"]["relations"]
+        == f"{make_token('10001')} 和 {make_token('10002')} 常一起出现"
+    )
+
+
 def test_invalid_json_is_failed() -> None:
     result = _run(GROUP, "这不是 JSON")
     assert result.status == "failed"
+    assert "无完整对象" in result.error
 
 
 def test_fenced_json_is_parsed() -> None:

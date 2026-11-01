@@ -8,24 +8,74 @@
   </head>
   <body>
     <header class="topbar">
-      <div>
+      <div class="brand">
         <h1>群像</h1>
-        <p class="subtitle">查看已整理的人物画像与群画像</p>
+        <span class="brand-sub">画像查看</span>
       </div>
-      <div class="topbar-actions">
-        <span id="counts" class="counts">加载中…</span>
+      <div class="statusbar">
+        <span id="status" class="status-chip">加载中…</span>
+        <span id="stats" class="stats"></span>
         <button id="refresh" class="button" type="button">刷新</button>
       </div>
     </header>
 
     <div class="layout">
       <aside class="sidebar">
+        <div class="sidebar-head">
+          <div>
+            <strong>会话</strong>
+            <span id="session-count" class="muted"></span>
+          </div>
+          <span class="muted">按最近更新</span>
+        </div>
         <input id="search" class="search" type="search" placeholder="搜索群号 / 私聊号 / 平台" />
         <div id="sessions" class="session-list"></div>
       </aside>
+
       <main id="detail" class="detail">
-        <p class="empty">选择左侧会话查看画像。</p>
+        <div class="placeholder">
+          <strong>选择左侧会话</strong>
+          <span>查看群画像与人物画像。</span>
+        </div>
       </main>
+    </div>
+
+    <div id="drawer" class="drawer" hidden>
+      <div class="drawer-backdrop" data-close="drawer"></div>
+      <aside class="drawer-panel" role="dialog" aria-modal="true" aria-labelledby="drawer-title">
+        <div class="drawer-head">
+          <div>
+            <div id="drawer-title" class="drawer-title">人物画像</div>
+            <div id="drawer-sub" class="muted"></div>
+          </div>
+          <div class="drawer-actions">
+            <button id="drawer-edit" class="button" type="button">编辑</button>
+            <button id="drawer-close" class="icon-button" type="button" aria-label="关闭">×</button>
+          </div>
+        </div>
+        <div id="drawer-body" class="drawer-body"></div>
+      </aside>
+    </div>
+
+    <div id="editor" class="modal" hidden>
+      <div class="modal-backdrop" data-close="editor"></div>
+      <section class="modal-card" role="dialog" aria-modal="true" aria-labelledby="editor-title">
+        <header class="modal-head">
+          <div>
+            <h2 id="editor-title">编辑画像</h2>
+            <p id="editor-sub" class="muted"></p>
+          </div>
+          <button id="editor-close" class="icon-button" type="button" aria-label="关闭">×</button>
+        </header>
+        <div id="editor-form" class="editor-form"></div>
+        <footer class="modal-foot">
+          <span id="editor-hint" class="muted">字段名使用 snake_case；空行不会保存。</span>
+          <div class="modal-actions">
+            <button id="editor-cancel" class="button" type="button">取消</button>
+            <button id="editor-save" class="button primary" type="button">保存</button>
+          </div>
+        </footer>
+      </section>
     </div>
 
     <script type="module" src="./app.js"></script>

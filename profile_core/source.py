@@ -109,6 +109,22 @@ class V2Source:
         ).fetchone()
         return int(row[0]) if row else 0
 
+    def sender_names(self, session: SessionKey, sender_id: str) -> list[str]:
+        """CM 里该 sender 在本会话出现过的昵称，按最近使用排序。"""
+        rows = self._connection.execute(
+            f"SELECT sender_nickname, MAX(seq) AS last_seq FROM {_MESSAGES_TABLE} "
+            "WHERE platform_name = ? AND message_type = ? AND session_id = ? "
+            "AND sender_id = ? AND sender_nickname <> '' "
+            "GROUP BY sender_nickname ORDER BY last_seq DESC",
+            (
+                session.platform_name,
+                session.message_type,
+                session.session_id,
+                str(sender_id),
+            ),
+        ).fetchall()
+        return [str(row[0]).strip() for row in rows if str(row[0]).strip()]
+
     def msg_uid_at(
         self,
         session: SessionKey,

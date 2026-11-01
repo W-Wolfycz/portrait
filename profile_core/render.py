@@ -150,6 +150,10 @@ def speaker_directory(speakers: tuple[Speaker, ...]) -> str:
     """生成提示词头部的发言人目录；别名按出现顺序列出。"""
     lines: list[str] = []
     for speaker in speakers:
-        names = "、".join(speaker.names) if speaker.names else "?"
+        names = (
+            "、".join(f"「{name}」" for name in speaker.names)
+            if speaker.names
+            else "「?」"
+        )
         lines.append(f"{speaker.label} = {names}")
     return "\n".join(lines)

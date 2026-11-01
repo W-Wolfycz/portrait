@@ -188,6 +188,21 @@ def test_list_profile_sessions_includes_group_and_person(
     assert group == {"long": {"theme": "技术"}}
 
 
+def test_manual_profile_edit_overwrites_without_touching_segments(
+    store: ProfileStore,
+) -> None:
+    """守：页面手改画像不能顺带消费片段或清掉其他人物。"""
+    store.save_profile_session(SESSION, {"long": {"theme": "手改"}})
+    store.save_profile_person(
+        SESSION, "10001", "A", {"long": {"identity": "手改"}}
+    )
+    assert store.get_profile_session(SESSION) == {"long": {"theme": "手改"}}
+    assert store.get_profile_person(SESSION, "10001") == {
+        "long": {"identity": "手改"}
+    }
+    assert store.pending_segments(SESSION) == []
+
+
 def test_skip_segments_removes_pending(store: ProfileStore) -> None:
     """守：政策跳过的片段仍留在 pending——被拒内容之后又被合并进画像。"""
     cursor = _cursor(store)

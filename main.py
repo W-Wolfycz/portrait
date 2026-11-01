@@ -10,6 +10,9 @@ from astrbot.core.platform.astr_message_event import AstrMessageEvent
 
 from .profile_core.config import Settings
 from .profile_core.contracts import SessionKey
+from .profile_core.directory import AstrBotDirectory
+from .profile_core.profile_schema import coerce_profile
+from .profile_core.refcodec import RefCatalog, encode_profile, render_profile
 from .profile_core.runtime import Runtime
 from .profile_core.tool import PortraitTool
 
@@ -30,6 +33,7 @@ class PortraitPlugin(Star):
         self.data_dir = str(StarTools.get_data_dir("portrait"))
         self.runtime: Runtime | None = None
         self.tool: PortraitTool | None = None
+        self.directory: AstrBotDirectory | None = None
 
     async def initialize(self) -> None:
         self.runtime = Runtime(
@@ -40,6 +44,7 @@ class PortraitPlugin(Star):
         )
         await self.runtime.start()
         self.tool = PortraitTool(self.runtime, self.logger)
+        self.directory = AstrBotDirectory(self.context)
         self.context.register_web_api(
             "/portrait/sessions",
             self.page_sessions,
@@ -52,22 +57,65 @@ class PortraitPlugin(Star):
             ["GET"],
             "群像：会话画像详情",
         )
+        self.context.register_web_api(
+            "/portrait/update-profile",
+            self.page_update_profile,
+            ["POST"],
+            "群像：手动修改画像",
+        )
+
+    @staticmethod
+    def _avatar_url(
+        platform: str,
+        target_id: str,
+        *,
+        group: bool = False,
+        size: int = 100,
+    ) -> str:
+        target = str(target_id or "").strip()
+        if platform != "aiocqhttp" or not target.isdigit():
+            return ""
+        if group:
+            return f"https://p.qlogo.cn/gh/{target}/{target}/{size}"
+        return f"https://q1.qlogo.cn/g?b=qq&nk={target}&s={size}"
 
     async def page_sessions(self):
         """插件页面：列出有画像的会话。"""
         if self.runtime is None or self.runtime.store is None:
             return error_response("画像功能未就绪")
         store = self.runtime.store
+        group_names = (
+            await self.directory.group_names() if self.directory else {}
+        )
+        friend_names = (
+            await self.directory.friend_names() if self.directory else {}
+        )
         items = []
         for session, group, updated_at in store.list_profile_sessions():
             persons = store.list_profile_persons(session)
+            if session.message_type == "GroupMessage":
+                display_name = group_names.get(session.session_id, "")
+            else:
+                display_name = friend_names.get(session.session_id, "")
+                if not display_name:
+                    display_name = self.runtime.current_sender_name(
+                        session, session.session_id
+                    )
             items.append(
                 {
                     "session": session.key,
+                    "display_name": display_name,
                     "platform": session.platform_name,
                     "message_type": session.message_type,
                     "session_id": session.session_id,
                     "updated_at": updated_at,
+                    "pending": store.pending_count(session),
+                    "unextracted": self.runtime.unextracted_messages(session),
+                    "avatar": self._avatar_url(
+                        session.platform_name,
+                        session.session_id,
+                        group=session.message_type == "GroupMessage",
+                    ),
                     "group": group or {},
                     "persons": [
                         {"sender_id": sender_id, "name": name}
@@ -79,6 +127,7 @@ class PortraitPlugin(Star):
             {
                 "ready": self.runtime.ready,
                 "counts": store.profile_counts(),
+                "status": self.runtime.status(),
                 "items": items,
             }
         )
@@ -97,25 +146,160 @@ class PortraitPlugin(Star):
 
         store = self.runtime.store
         group = store.get_profile_session(session)
+        display_name = ""
+        member_names: dict[str, str] = {}
+        if self.directory is not None:
+            if session.message_type == "GroupMessage":
+                display_name = (await self.directory.group_names()).get(
+                    session.session_id, ""
+                )
+                member_names = await self.directory.member_names(
+                    session.session_id
+                )
+            else:
+                friend_names = await self.directory.friend_names()
+                display_name = friend_names.get(session.session_id, "")
+                if not display_name:
+                    display_name = self.runtime.current_sender_name(
+                        session, session.session_id
+                    )
+                if display_name:
+                    member_names = {session.session_id: display_name}
         persons = []
-        for sender_id, name in store.list_profile_persons(session):
+        person_rows = store.list_profile_persons(session)
+        cm_names = {
+            sender_id: self.runtime.current_sender_name(session, sender_id)
+            for sender_id, name in person_rows
+            if not name.strip() or name.strip().isdigit()
+        }
+        catalog_entries: list[tuple[str, str]] = [
+            (
+                sender_id,
+                member_names.get(sender_id)
+                or (
+                    cm_names.get(sender_id, "")
+                    if (
+                        not name.strip()
+                        or name.strip().isdigit()
+                    )
+                    else name
+                ),
+            )
+            for sender_id, name in person_rows
+        ]
+        catalog_entries.extend(member_names.items())
+        catalog = RefCatalog(catalog_entries)
+        group = render_profile(group, catalog, for_llm=False)
+        for sender_id, name in person_rows:
+            name = member_names.get(sender_id) or name
+            if not name.strip() or name.strip().isdigit():
+                name = (
+                    cm_names.get(sender_id, "")
+                    or name
+                )
             persons.append(
                 {
                     "sender_id": sender_id,
                     "name": name,
-                    "profile": store.get_profile_person(session, sender_id) or {},
+                    "avatar": self._avatar_url(
+                        session.platform_name, sender_id
+                    ),
+                    "profile": render_profile(
+                        store.get_profile_person(session, sender_id) or {},
+                        catalog,
+                        for_llm=False,
+                    ),
                 }
             )
-        if group is None and not persons:
+        if not group and not persons:
             return error_response("暂无画像")
         return json_response(
             {
                 "session": session.key,
+                "display_name": display_name,
+                "avatar": self._avatar_url(
+                    session.platform_name,
+                    session.session_id,
+                    group=session.message_type == "GroupMessage",
+                ),
                 "platform": session.platform_name,
                 "message_type": session.message_type,
                 "session_id": session.session_id,
+                "pending": store.pending_count(session),
+                "unextracted": self.runtime.unextracted_messages(session),
                 "group": group or {},
                 "persons": persons,
+            }
+        )
+
+    async def _catalog_for(self, session: SessionKey) -> RefCatalog:
+        assert self.runtime is not None and self.runtime.store is not None
+        store = self.runtime.store
+        entries: list[tuple[str, str]] = list(
+            store.list_profile_persons(session)
+        )
+        if self.directory is not None:
+            if session.message_type == "GroupMessage":
+                member_names = await self.directory.member_names(
+                    session.session_id
+                )
+                entries.extend(member_names.items())
+            else:
+                friend_names = await self.directory.friend_names()
+                name = friend_names.get(session.session_id, "")
+                if name:
+                    entries.append((session.session_id, name))
+        return RefCatalog(entries)
+
+    async def page_update_profile(self):
+        """插件页面：手动增删改群画像/人物画像字段。"""
+        if self.runtime is None or self.runtime.store is None:
+            return error_response("画像功能未就绪")
+        payload = await request.json(default={})
+        if not isinstance(payload, dict):
+            return error_response("请求格式不正确")
+        kind = str(payload.get("kind") or "").strip().lower()
+        if kind not in {"group", "person"}:
+            return error_response("kind 必须是 group 或 person")
+        key = str(payload.get("session") or "").strip()
+        if not key:
+            return error_response("缺少 session")
+        try:
+            session = SessionKey.parse(key)
+        except ValueError:
+            return error_response("session 格式不正确")
+        if kind == "group" and session.message_type != "GroupMessage":
+            return error_response("私聊没有群画像")
+        raw_profile = payload.get("profile")
+        if not isinstance(raw_profile, dict):
+            return error_response("profile 必须是对象")
+        profile = coerce_profile(raw_profile, kind)
+        catalog = await self._catalog_for(session)
+        profile = encode_profile(profile, catalog)
+        store = self.runtime.store
+        if kind == "group":
+            store.save_profile_session(session, profile)
+        else:
+            sender_id = str(payload.get("sender_id") or "").strip()
+            if not sender_id:
+                return error_response("缺少 sender_id")
+            name = str(payload.get("display_name") or "").strip()
+            if not name:
+                name = next(
+                    (
+                        display
+                        for sid, display in store.list_profile_persons(session)
+                        if sid == sender_id
+                    ),
+                    "",
+                )
+            store.save_profile_person(session, sender_id, name, profile)
+        return json_response(
+            {
+                "saved": True,
+                "session": session.key,
+                "kind": kind,
+                "profile": profile,
             }
         )
 
@@ -124,6 +308,7 @@ class PortraitPlugin(Star):
             await self.runtime.stop()
             self.runtime = None
         self.tool = None
+        self.directory = None
 
     @filter.llm_tool(name="portrait_query")
     async def portrait_query(
