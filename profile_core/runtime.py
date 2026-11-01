@@ -118,15 +118,17 @@ class Runtime:
                 self._task = asyncio.create_task(
                     self._loop(), name="portrait_scanner"
                 )
-            self._log(
-                "INFO",
-                "扫描器启动：sessions=%d pending_segments=%d interval=%.0fs"
-                % (
-                    len(self.source.list_sessions()),
-                    self.store.profile_counts()["pending_segments"],
-                    self._interval,
-                ),
-            )
+                self._log(
+                    "INFO",
+                    "扫描器启动：sessions=%d pending_segments=%d interval=%.0fs"
+                    % (
+                        len(self.source.list_sessions()),
+                        self.store.profile_counts()["pending_segments"],
+                        self._interval,
+                    ),
+                )
+            else:
+                self._log("INFO", "画像插件已加载，扫描器未启用")
         except Exception as exc:
             self.error = f"{type(exc).__name__}: {exc}"
             self._log("ERROR", f"扫描器启动失败：{self.error}")

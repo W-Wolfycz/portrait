@@ -112,6 +112,21 @@ class AstrBotDirectory:
                 continue
         return None
 
+    async def _call_all(self, action: str, **kwargs: Any) -> list[Any]:
+        """多 BOT 实例分别查；单个实例只知道自己加入的群。"""
+        results: list[Any] = []
+        for client in self._clients():
+            try:
+                results.append(
+                    await asyncio.wait_for(
+                        client.call_action(action, **kwargs),
+                        timeout=self._timeout,
+                    )
+                )
+            except Exception:
+                continue
+        return results
+
     async def group_names(self) -> dict[str, str]:
         now = time.monotonic()
         if self._group_names and now < self._group_names[0]:
@@ -120,8 +135,9 @@ class AstrBotDirectory:
             now = time.monotonic()
             if self._group_names and now < self._group_names[0]:
                 return self._group_names[1]
-            raw = await self._call("get_group_list")
-            mapping = _group_map(raw)
+            mapping: dict[str, str] = {}
+            for raw in await self._call_all("get_group_list"):
+                mapping.update(_group_map(raw))
             self._group_names = (now + self._ttl, mapping)
             return mapping
 
@@ -138,10 +154,11 @@ class AstrBotDirectory:
             cached = self._member_names.get(group_id)
             if cached and now < cached[0]:
                 return cached[1]
-            raw = await self._call(
+            mapping: dict[str, str] = {}
+            for raw in await self._call_all(
                 "get_group_member_list", group_id=int(group_id)
-            )
-            mapping = _member_map(raw)
+            ):
+                mapping.update(_member_map(raw))
             self._member_names[group_id] = (now + self._ttl, mapping)
             return mapping
 
@@ -153,7 +170,8 @@ class AstrBotDirectory:
             now = time.monotonic()
             if self._friend_names and now < self._friend_names[0]:
                 return self._friend_names[1]
-            raw = await self._call("get_friend_list")
-            mapping = _friend_map(raw)
+            mapping: dict[str, str] = {}
+            for raw in await self._call_all("get_friend_list"):
+                mapping.update(_friend_map(raw))
             self._friend_names = (now + self._ttl, mapping)
             return mapping

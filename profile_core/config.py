@@ -71,6 +71,7 @@ def parse_hhmm(text: str, default: str = DEFAULT_TIME) -> time:
 
 @dataclass(frozen=True)
 class Settings:
+    enabled: bool = False
     llm_provider: str = ""
 
     extract_threshold: int = 50
@@ -97,6 +98,7 @@ class Settings:
 
     enable_group_profile: bool = True
     enable_person_profile: bool = True
+    inject_context: bool = True
     blacklist_sessions: tuple[str, ...] = ()
     llm_max_concurrency: int = 4
     failure_advance_after: int = 3
@@ -110,6 +112,7 @@ class Settings:
     def from_dict(cls, raw: Any) -> "Settings":
         data = raw if isinstance(raw, dict) else {}
         return cls(
+            enabled=_as_bool(data.get("enabled"), False),
             llm_provider=_as_text(data.get("llm_provider")),
             extract_threshold=_as_int(
                 data.get("extract_threshold"), 50, minimum=1
@@ -140,6 +143,7 @@ class Settings:
             enable_person_profile=_as_bool(
                 data.get("enable_person_profile"), True
             ),
+            inject_context=_as_bool(data.get("inject_context"), True),
             blacklist_sessions=_as_list(data.get("blacklist_sessions")),
             llm_max_concurrency=_as_int(
                 data.get("llm_max_concurrency"), 4, minimum=1

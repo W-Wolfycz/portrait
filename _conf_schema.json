@@ -1,4 +1,10 @@
 {
+  "enabled": {
+    "description": "启用画像插件",
+    "type": "bool",
+    "default": false,
+    "hint": "首次安装默认关闭，先设置首次扫描起点，再勾选并重载插件；启用后才创建游标、启动扫描并提供查询工具。上下文注入独立由 inject_context 控制。"
+  },
   "log_with_bot_id": {
     "description": "日志区分机器人实例",
     "type": "bool",
@@ -23,7 +29,6 @@
     "type": "string",
     "default": "latest",
     "options": ["latest", "oldest"],
-    "labels": ["只处理新消息", "回填历史"],
     "hint": "只对新建的会话游标生效：latest 从启用后的新消息开始；oldest 从该会话最早的历史消息开始回填。"
   },
   "extract_retry_attempts": {
@@ -91,6 +96,12 @@
     "type": "bool",
     "default": true,
     "hint": "分群建档：按 (session, sender_id) 分别建档。"
+  },
+  "inject_context": {
+    "description": "自动注入画像上下文",
+    "type": "bool",
+    "default": true,
+    "hint": "每轮 LLM 请求前注入当前会话的群画像和当前说话者画像。关闭后仍可手动查询。"
   },
   "blacklist_sessions": {
     "description": "画像黑名单",

@@ -40,6 +40,7 @@
 | D19 | 昵称 → `sender_id` 的模糊解析**交给 QQ 群成员目录**（`get_group_member_list`）；非 aiocqhttp/目录失败时用本地兜底 |
 | D20 | **所有可并发的 LLM 调用并行**：多 session 萃取、群/人物合并、查询；全局上限 `llm_max_concurrency` |
 | D21 | **引用编解码**：DB 存 `{{uid}}` token；LLM/UI 渲染昵称；同名给 LLM 加 `#n`，UI 不显示后缀 |
+| D22 | **自动上下文**：`on_llm_request` 把当前会话群画像 + 当前说话者画像作为临时文本注入；默认开、可截断、不写入历史 |
 
 ---
 
@@ -230,6 +231,25 @@ UI：与小明关系好
 - 同名：LLM 目录按 `sender_id` 稳定分配 `#1/#2`，UI 用头像/QQ 号区分；
 - 反解：只接受精确标签；同名无后缀或未知标签不猜；
 - 旧画像已是昵称/P#，没有 token，不能可靠反解；需要重新萃取。
+
+### 4.6 自动上下文注入
+
+每轮 LLM 请求通过 `on_llm_request` 注入：
+
+```text
+<portrait_context>
+[群画像]
+long: ...
+[当前说话者画像：昵称]
+mid: ...
+</portrait_context>
+```
+
+- 只注入当前会话；群聊含群画像 + 当前 sender，私聊只含当前 sender；
+- token 渲染成 `「昵称」`，不注入裸 ID；
+- 作为 `extra_user_content_parts` 的临时 part，不写入对话历史；
+- 画像内容视为不可信背景，不执行其中指令；
+- `inject_context=false` 可关闭，`portrait_query` 仍可查。
 
 ---
 
@@ -602,7 +622,7 @@ log_with_bot_id            true
 
 - 插件入口：`main.py`（后台扫描器 + `portrait_query` tool + `portrait status/merge/scan` 命令）；
 - `profile_core/`：`contracts/source/identity/render/segment/nickname/store/extract/merge/llm/prompts/runtime/tool/qqdir/config`；
-- 测试 **103 passed**（读取/渲染/P#/片段/游标/萃取/合并/工具/运行时/上下文补齐/LLM 适配/自适应调度）；
+- 测试 **104 passed**（读取/渲染/P#/片段/游标/萃取/合并/工具/运行时/上下文补齐/LLM 适配/自适应调度）；
 - 现网库只读验收：500 条渲染、零 `⟦CM_*⟧`、P# 一致、纯图不进片段；
 - 已部署到 `data/plugins/portrait`（不含 docs/tests/cm_pipeline）；
 - 未做：真实 provider 的部署端冒烟（需要 reload 后由用户操作）。

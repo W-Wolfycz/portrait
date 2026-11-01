@@ -4,11 +4,14 @@ from __future__ import annotations
 
 from astrbot.api import AstrBotConfig
 from astrbot.api.event import filter
+from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, StarTools
 from astrbot.api.web import error_response, json_response, request
+from astrbot.core.agent.message import TextPart
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
 
 from .profile_core.config import Settings
+from .profile_core.context import build_portrait_context
 from .profile_core.contracts import SessionKey
 from .profile_core.directory import AstrBotDirectory
 from .profile_core.profile_schema import coerce_profile
@@ -42,7 +45,7 @@ class PortraitPlugin(Star):
             logger=self.logger,
             data_dir=self.data_dir,
         )
-        await self.runtime.start()
+        await self.runtime.start(auto_loop=self.settings.enabled)
         self.tool = PortraitTool(self.runtime, self.logger)
         self.directory = AstrBotDirectory(self.context)
         self.context.register_web_api(
@@ -63,6 +66,48 @@ class PortraitPlugin(Star):
             ["POST"],
             "群像：手动修改画像",
         )
+
+    @filter.on_llm_request(priority=-200)
+    async def inject_portrait_context(
+        self, event: AstrMessageEvent, req: ProviderRequest
+    ) -> None:
+        """把当前会话画像追加到本轮临时上下文。"""
+        if self.runtime is None or self.runtime.store is None:
+            return
+        if not self.settings.inject_context:
+            return
+        try:
+            group_id = str(event.get_group_id() or "")
+            message_type = "GroupMessage" if group_id else "FriendMessage"
+            session_id = group_id or str(event.get_sender_id() or "")
+            if not session_id:
+                return
+            session = SessionKey(
+                event.get_platform_name(), message_type, session_id
+            )
+            if self.settings.is_blacklisted(session):
+                return
+            sender_id = str(event.get_sender_id() or "")
+            sender_name = str(event.get_sender_name() or "")
+            text = build_portrait_context(
+                self.runtime.store,
+                session,
+                sender_id,
+                sender_name,
+                include_group=self.settings.enable_group_profile,
+                include_person=self.settings.enable_person_profile,
+            )
+            if not text:
+                return
+            parts = getattr(req, "extra_user_content_parts", None)
+            if parts is None:
+                parts = []
+                req.extra_user_content_parts = parts
+            parts.append(TextPart(text=text).mark_as_temp())
+        except Exception as exc:
+            self.logger.debug(
+                "画像上下文注入失败: %s: %s", type(exc).__name__, exc
+            )
 
     @staticmethod
     def _avatar_url(
@@ -325,6 +370,8 @@ class PortraitPlugin(Star):
             target(string): 人物昵称或 QQ 号；留空表示当前发送者
             question(string): 要问的问题
         """
+        if not self.settings.enabled:
+            return "画像功能未启用"
         if self.tool is None:
             return "画像功能未就绪"
         return await self.tool.query(
@@ -347,6 +394,7 @@ class PortraitPlugin(Star):
         status = self.runtime.status()
         lines = [
             "画像状态：",
+            f"启用：{self.settings.enabled}",
             f"就绪：{status['ready']}",
             f"扫描间隔：{status['interval']}s",
             f"会话画像：{status['sessions']}",
@@ -364,6 +412,9 @@ class PortraitPlugin(Star):
         if not event.is_admin():
             yield event.plain_result("仅管理员可手动合并")
             return
+        if not self.settings.enabled:
+            yield event.plain_result("画像功能未启用")
+            return
         if self.runtime is None or not self.runtime.ready:
             yield event.plain_result("画像功能未就绪")
             return
@@ -375,6 +426,9 @@ class PortraitPlugin(Star):
         """管理员手动触发一次扫描。"""
         if not event.is_admin():
             yield event.plain_result("仅管理员可手动扫描")
+            return
+        if not self.settings.enabled:
+            yield event.plain_result("画像功能未启用")
             return
         if self.runtime is None or not self.runtime.ready:
             yield event.plain_result("画像功能未就绪")
