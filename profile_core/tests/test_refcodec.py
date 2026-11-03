@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from profile_core.refcodec import RefCatalog, encode_profile, make_token, render_profile
+from profile_core.refcodec import (
+    RefCatalog,
+    encode_profile,
+    make_token,
+    render_profile,
+)
 
 
 def test_same_name_gets_stable_llm_suffix_but_clean_ui() -> None:
@@ -39,31 +44,24 @@ def test_encode_labels_and_p_refs_to_tokens() -> None:
     )
     assert encoded["persons"][0]["speaker"] == "P1"
 
-
-def test_manual_plain_nickname_is_tokenized_only_when_unique() -> None:
-    unique = RefCatalog([("1", "小明"), ("2", "小红")])
-    encoded = encode_profile(
+    unique = encode_profile(
         {"long": {"relations": "和小明关系很好"}},
-        unique,
+        catalog,
         plain_names=True,
     )
-    assert encoded["long"]["relations"] == f"和{make_token('1')}关系很好"
-
-    ambiguous = RefCatalog([("1", "小明"), ("2", "小明")])
-    encoded = encode_profile(
+    assert unique["long"]["relations"] == f"和{make_token('1')}关系很好"
+    ambiguous_catalog = RefCatalog([("1", "小明"), ("2", "小明")])
+    ambiguous = encode_profile(
         {"long": {"relations": "和小明关系很好"}},
-        ambiguous,
+        ambiguous_catalog,
         plain_names=True,
     )
-    assert encoded["long"]["relations"] == "和小明关系很好"
+    assert ambiguous["long"]["relations"] == "和小明关系很好"
 
-
-def test_render_profile_hides_tokens_from_llm_and_ui() -> None:
-    catalog = RefCatalog([("1", "小明")])
-    profile = {"mid": {"relations": f"与{make_token('1')}关系好"}}
-    assert render_profile(profile, catalog, for_llm=True)["mid"][
+    stored = {"mid": {"relations": f"与{make_token('1')}关系好"}}
+    assert render_profile(stored, catalog, for_llm=True)["mid"][
         "relations"
     ] == "与「小明」关系好"
-    assert render_profile(profile, catalog, for_llm=False)["mid"][
+    assert render_profile(stored, catalog, for_llm=False)["mid"][
         "relations"
     ] == "与小明关系好"

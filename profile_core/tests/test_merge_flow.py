@@ -41,34 +41,28 @@ def _runtime(tmp_path: Path, **overrides) -> Runtime:
 
 
 def test_group_is_merged_once_with_all_segments(tmp_path: Path) -> None:
-    runtime = _runtime(tmp_path)
     summaries = [
         {"group": {"theme": f"s{index}"}, "persons": [], "mentioned": []}
         for index in range(80)
     ]
 
     async def scenario() -> None:
+        runtime = _runtime(tmp_path / "single")
         result = await runtime._merge_group(SESSION, summaries)
         assert result
         assert runtime.merger.group_calls == [(None, 80)]
         runtime.store.close()
 
-    asyncio.run(scenario())
-
-
-def test_group_optional_batching(tmp_path: Path) -> None:
-    runtime = _runtime(tmp_path, max_segments_per_merge=10)
-    summaries = [
-        {"group": {"theme": f"s{index}"}, "persons": [], "mentioned": []}
-        for index in range(80)
-    ]
-
-    async def scenario() -> None:
-        result = await runtime._merge_group(SESSION, summaries)
+        batched = _runtime(
+            tmp_path / "batched", max_segments_per_merge=10
+        )
+        result = await batched._merge_group(SESSION, summaries)
         assert result
-        assert [size for _, size in runtime.merger.group_calls] == [10] * 8 + [8]
-        runtime.store.close()
+        assert [size for _, size in batched.merger.group_calls] == [10] * 8 + [8]
+        batched.store.close()
 
+    (tmp_path / "single").mkdir()
+    (tmp_path / "batched").mkdir()
     asyncio.run(scenario())
 
 

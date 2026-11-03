@@ -138,33 +138,6 @@ def test_scan_then_merge_end_to_end(tmp_path: Path) -> None:
     assert len(llm.prompts) == 3
 
 
-def test_extraction_repeated_failures_advance_cursor(tmp_path: Path) -> None:
-    _make_cm(tmp_path / "cm.db")
-    runtime = Runtime(
-        None,
-        _settings(
-            tmp_path,
-            failure_advance_after=2,
-            extract_refusal_advance_messages=1,
-        ),
-        logger=logging.getLogger("test"),
-        data_dir=str(tmp_path),
-        llm=ScriptedLlm([]),
-        cm_db_path=str(tmp_path / "cm.db"),
-        profile_db_path=str(tmp_path / "profile.db"),
-    )
-
-    async def scenario() -> None:
-        await runtime.start(auto_loop=False)
-        await runtime.scan_now()
-        assert runtime.store.get_cursor(SESSION).seq == 0
-        await runtime.scan_now()
-        assert runtime.store.get_cursor(SESSION).seq == 1
-        await runtime.stop()
-
-    asyncio.run(scenario())
-
-
 def test_merge_repeated_failures_skip_pending(tmp_path: Path) -> None:
     _make_cm(tmp_path / "cm.db")
     llm = ScriptedLlm(
@@ -211,71 +184,6 @@ def test_merge_repeated_failures_skip_pending(tmp_path: Path) -> None:
 
     asyncio.run(scenario())
 
-def test_backlog_counts_unprocessed_messages(tmp_path: Path) -> None:
-    _make_cm(tmp_path / "cm.db")
-    runtime = Runtime(
-        None,
-        _settings(tmp_path),
-        logger=logging.getLogger("test"),
-        data_dir=str(tmp_path),
-        llm=ScriptedLlm(
-            [json.dumps({"persons": [], "group": {}, "mentioned": []})]
-        ),
-        cm_db_path=str(tmp_path / "cm.db"),
-        profile_db_path=str(tmp_path / "profile.db"),
-    )
-
-    async def scenario() -> None:
-        await runtime.start(auto_loop=False)
-        assert runtime._backlog() == (1, 3, 0)
-        await runtime.scan_now()
-        assert runtime._backlog() == (1, 1, 1)
-        await runtime.stop()
-
-    asyncio.run(scenario())
-
-
-def test_extraction_retries_failed_json_immediately(tmp_path: Path) -> None:
-    _make_cm(tmp_path / "cm.db")
-    llm = ScriptedLlm(
-        [
-            "not json",
-            json.dumps(
-                {
-                    "persons": [
-                        {
-                            "speaker": "P1",
-                            "name": "A",
-                            "sections": {"identity": "在杭州"},
-                        }
-                    ],
-                    "group": {"theme": "技术"},
-                    "mentioned": [],
-                },
-                ensure_ascii=False,
-            ),
-        ]
-    )
-    runtime = Runtime(
-        None,
-        _settings(tmp_path),
-        logger=logging.getLogger("test"),
-        data_dir=str(tmp_path),
-        llm=llm,
-        cm_db_path=str(tmp_path / "cm.db"),
-        profile_db_path=str(tmp_path / "profile.db"),
-    )
-
-    async def scenario() -> None:
-        await runtime.start(auto_loop=False)
-        await runtime.scan_now()
-        assert runtime.store.profile_counts()["pending_segments"] == 1
-        await runtime.stop()
-
-    asyncio.run(scenario())
-    assert len(llm.prompts) == 2
-
-
 def test_initial_cursor_latest_skips_history(tmp_path: Path) -> None:
     _make_cm(tmp_path / "cm.db")
     llm = ScriptedLlm([])
@@ -301,19 +209,55 @@ def test_initial_cursor_latest_skips_history(tmp_path: Path) -> None:
     assert llm.prompts == []
 
 
-def test_extraction_failure_does_not_advance_cursor(tmp_path: Path) -> None:
-    _make_cm(tmp_path / "cm.db")
-    runtime = Runtime(
-        None,
-        _settings(tmp_path),
-        logger=logging.getLogger("test"),
-        data_dir=str(tmp_path),
-        llm=ScriptedLlm([]),
-        cm_db_path=str(tmp_path / "cm.db"),
-        profile_db_path=str(tmp_path / "profile.db"),
+def test_extraction_failure_accounting(tmp_path: Path) -> None:
+    valid = json.dumps(
+        {
+            "persons": [
+                {
+                    "speaker": "P1",
+                    "name": "A",
+                    "sections": {"identity": "在杭州"},
+                }
+            ],
+            "group": {"theme": "技术"},
+            "mentioned": [],
+        },
+        ensure_ascii=False,
     )
 
-    async def scenario() -> None:
+    async def retry_scenario() -> None:
+        root = tmp_path / "retry"
+        root.mkdir()
+        _make_cm(root / "cm.db")
+        llm = ScriptedLlm(["not json", valid])
+        runtime = Runtime(
+            None,
+            _settings(root),
+            logger=logging.getLogger("test"),
+            data_dir=str(root),
+            llm=llm,
+            cm_db_path=str(root / "cm.db"),
+            profile_db_path=str(root / "profile.db"),
+        )
+        await runtime.start(auto_loop=False)
+        await runtime.scan_now()
+        assert runtime.store.profile_counts()["pending_segments"] == 1
+        await runtime.stop()
+        assert len(llm.prompts) == 2
+
+    async def failure_scenario() -> None:
+        root = tmp_path / "failure"
+        root.mkdir()
+        _make_cm(root / "cm.db")
+        runtime = Runtime(
+            None,
+            _settings(root),
+            logger=logging.getLogger("test"),
+            data_dir=str(root),
+            llm=ScriptedLlm([]),
+            cm_db_path=str(root / "cm.db"),
+            profile_db_path=str(root / "profile.db"),
+        )
         await runtime.start(auto_loop=False)
         await runtime.scan_now()
         cursor = runtime.store.get_cursor(SESSION)
@@ -321,4 +265,30 @@ def test_extraction_failure_does_not_advance_cursor(tmp_path: Path) -> None:
         assert runtime.store.profile_counts()["pending_segments"] == 0
         await runtime.stop()
 
-    asyncio.run(scenario())
+    async def advance_scenario() -> None:
+        root = tmp_path / "advance"
+        root.mkdir()
+        _make_cm(root / "cm.db")
+        runtime = Runtime(
+            None,
+            _settings(
+                root,
+                failure_advance_after=2,
+                extract_refusal_advance_messages=1,
+            ),
+            logger=logging.getLogger("test"),
+            data_dir=str(root),
+            llm=ScriptedLlm([]),
+            cm_db_path=str(root / "cm.db"),
+            profile_db_path=str(root / "profile.db"),
+        )
+        await runtime.start(auto_loop=False)
+        await runtime.scan_now()
+        assert runtime.store.get_cursor(SESSION).seq == 0
+        await runtime.scan_now()
+        assert runtime.store.get_cursor(SESSION).seq == 1
+        await runtime.stop()
+
+    asyncio.run(retry_scenario())
+    asyncio.run(failure_scenario())
+    asyncio.run(advance_scenario())

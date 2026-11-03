@@ -261,10 +261,9 @@ class Runtime:
         bumped = self.store.apply_schema_guard(meta)
         if bumped:
             self._log(
-                "WARNING",
-                f"影子表 schema 变化，重置 {bumped} 个会话游标；本轮暂停",
+                "INFO",
+                f"CM schema 标记变化，重绑 {bumped} 个会话游标，保留 seq",
             )
-            return 0
         schema_ver = int(meta.get("schema_version") or 0)
         dual = str(meta.get("dual_write_started_at") or "")
 

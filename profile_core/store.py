@@ -290,16 +290,20 @@ class ProfileStore:
         *,
         moment: datetime | None = None,
     ) -> int:
-        """影子表 schema/起始时间变化时，把所有会话代际 +1。"""
+        """schema/dual 元信息变化时只重绑标记，不推翻已有游标。
+
+        真正的 seq/uid 重置交给 detect_reset 判断。
+        """
         schema_ver = _safe_int(shadow_meta.get("schema_version"), 0)
-        dual_started = str(shadow_meta.get("dual_write_started_at") or "").strip()
+        dual_started = str(
+            shadow_meta.get("dual_write_started_at") or ""
+        ).strip()
         if not schema_ver and not dual_started:
             return 0
         now = utc_now_iso(moment)
         cursor = self._connection.execute(
-            "UPDATE cursor SET seq = 0, msg_uid = '', generation = generation + 1, "
-            "schema_ver = ?, dual_started = ?, last_status = 'schema_changed', "
-            "last_error = '', updated_at = ? "
+            "UPDATE cursor SET schema_ver = ?, dual_started = ?, "
+            "last_status = 'schema_rebind', last_error = '', updated_at = ? "
             "WHERE schema_ver <> ? OR dual_started <> ?",
             (schema_ver, dual_started, now, schema_ver, dual_started),
         )

@@ -622,7 +622,7 @@ log_with_bot_id            true
 
 - 插件入口：`main.py`（后台扫描器 + `portrait_query` tool + `portrait status/merge/scan` 命令）；
 - `profile_core/`：`contracts/source/identity/render/segment/nickname/store/extract/merge/llm/prompts/runtime/tool/qqdir/config`；
-- 测试 **105 passed**（读取/渲染/P#/片段/游标/萃取/合并/工具/运行时/上下文补齐/LLM 适配/自适应调度）；
+- 测试 **57 passed**（读取/渲染/P#/片段/游标/萃取/合并/工具/运行时/上下文补齐/LLM 适配/自适应调度）；
 - 现网库只读验收：500 条渲染、零 `⟦CM_*⟧`、P# 一致、纯图不进片段；
 - 已部署到 `data/plugins/portrait`（不含 docs/tests/cm_pipeline）；
 - 未做：真实 provider 的部署端冒烟（需要 reload 后由用户操作）。

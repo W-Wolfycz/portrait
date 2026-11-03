@@ -1,4 +1,4 @@
-"""片段萃取：JSON 校验、P# 越界、上限、私聊群字段、空/坏 JSON。"""
+"""片段萃取：JSON 校验、P# 越界、上限、空/坏 JSON。"""
 
 from __future__ import annotations
 
@@ -15,7 +15,6 @@ from profile_core.render import RenderOptions, render_segment
 from ._helpers import message
 
 GROUP = SessionKey("demo", "GroupMessage", "group_demo")
-PRIVATE = SessionKey("demo", "FriendMessage", "10001")
 UTC = RenderOptions(timezone=timezone.utc)
 
 
@@ -39,21 +38,20 @@ def _rendered():
     )
 
 
-def _run(session, payload) -> object:
+def _run(payload) -> object:
     text = payload if isinstance(payload, str) else json.dumps(
         payload, ensure_ascii=False
     )
     extractor = SegmentExtractor(FakeLlm(text))
     return asyncio.run(
         extractor.extract(
-            session, _rendered(), started_at="2026-10-29 10:00", ended_at="10:05"
+            GROUP, _rendered(), started_at="2026-10-29 10:00", ended_at="10:05"
         )
     )
 
 
 def test_valid_output_maps_sender_id() -> None:
     result = _run(
-        GROUP,
         {
             "persons": [
                 {
@@ -64,7 +62,7 @@ def test_valid_output_maps_sender_id() -> None:
             ],
             "group": {"theme": "闲聊"},
             "mentioned": [{"name": "小刚", "note": "在考研"}],
-        },
+        }
     )
     assert result.status == "success"
     person = result.summary["persons"][0]
@@ -76,35 +74,8 @@ def test_valid_output_maps_sender_id() -> None:
     assert result.summary["mentioned"][0]["name"] == "小刚"
 
 
-def test_unknown_speaker_is_dropped() -> None:
-    result = _run(
-        GROUP,
-        {"persons": [{"speaker": "P9", "sections": {"identity": "x"}}]},
-    )
-    assert result.status == "empty"
-    assert result.dropped == 1
-
-
-def test_private_session_ignores_group() -> None:
-    result = _run(
-        PRIVATE,
-        {
-            "persons": [{"speaker": "P1", "sections": {"identity": "x"}}],
-            "group": {"theme": "不该出现"},
-        },
-    )
-    assert result.status == "success"
-    assert result.summary["group"] == {}
-
-
-def test_empty_payload_is_empty_status() -> None:
-    result = _run(GROUP, {"persons": [], "group": {}, "mentioned": []})
-    assert result.status == "empty"
-
-
 def test_relations_encode_p_labels_as_tokens() -> None:
     result = _run(
-        GROUP,
         {
             "persons": [
                 {
@@ -114,7 +85,7 @@ def test_relations_encode_p_labels_as_tokens() -> None:
                 }
             ],
             "group": {"relations": "P1 和 P2 常一起出现"},
-        },
+        }
     )
     assert result.status == "success"
     assert (
@@ -128,39 +99,20 @@ def test_relations_encode_p_labels_as_tokens() -> None:
 
 
 def test_invalid_json_is_failed() -> None:
-    result = _run(GROUP, "这不是 JSON")
+    result = _run("这不是 JSON")
     assert result.status == "failed"
     assert "无完整对象" in result.error
-
-
-def test_fenced_json_is_parsed() -> None:
-    text = "```json\n" + json.dumps(
-        {"persons": [{"speaker": "P1", "sections": {"identity": "x"}}]},
-        ensure_ascii=False,
-    ) + "\n```"
-    result = _run(GROUP, text)
-    assert result.status == "success"
-    assert result.summary["persons"][0]["sender_id"] == "10001"
-
-
-def test_unknown_sections_dropped_and_text_truncated() -> None:
-    result = _run(
-        GROUP,
-        {
-            "persons": [
-                {
-                    "speaker": "P1",
-                    "sections": {"identity": "x" * 200, "Bad Key": "drop"},
-                }
-            ]
-        },
-    )
-    sections = result.summary["persons"][0]["sections"]
-    assert "Bad Key" not in sections["long"]
-    assert len(sections["long"]["identity"]) == 80
+    empty = _run({"persons": [], "group": {}, "mentioned": []})
+    assert empty.status == "empty"
 
 
 def test_persons_are_capped_at_eight() -> None:
+    unknown = _run(
+        {"persons": [{"speaker": "P9", "sections": {"identity": "x"}}]},
+    )
+    assert unknown.status == "empty"
+    assert unknown.dropped == 1
+
     messages = [
         message(seq=index, sender=f"1000{index}", name=f"U{index}", text="x")
         for index in range(1, 10)

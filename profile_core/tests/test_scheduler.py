@@ -1,8 +1,4 @@
-"""自适应扫描间隔与时区回退。
-
-只留「配置键被默默忽略」「当日重试预算失控」「时区悄悄错位」三类；
-间隔的 ±5% 系数与上下限在状态/日志里看得见，不再逐条断言。
-"""
+"""自适应扫描间隔与时区回退。"""
 
 from __future__ import annotations
 
@@ -45,22 +41,14 @@ def test_merge_retry_is_limited_per_day() -> None:
     assert Runtime._merge_retry_delay(3) == 0.0
 
 
-def test_timezone_follows_astrbot_config() -> None:
-    """守：时区配置被默默忽略——提示词里的时间整体偏移却不报错。"""
+def test_timezone_resolution() -> None:
+    """守：时区配置被忽略或非法值回落 OS 本地——提示词时间整体偏移。"""
     runtime = _runtime()
     runtime.context = FakeContext({"timezone": "Asia/Shanghai"})
     assert runtime._resolve_timezone().key == "Asia/Shanghai"
 
-
-def test_timezone_missing_falls_back_to_utc() -> None:
-    """守：缺失时区回退到 OS 本地时区——时间戳悄悄错位。"""
-    runtime = _runtime()
     runtime.context = FakeContext({})
     assert runtime._resolve_timezone() is timezone.utc
 
-
-def test_timezone_invalid_falls_back_to_utc() -> None:
-    """守：非法时区名抛异常或回退本地时区——时间悄悄错位。"""
-    runtime = _runtime()
     runtime.context = FakeContext({"timezone": "Not/AZone"})
     assert runtime._resolve_timezone() is timezone.utc

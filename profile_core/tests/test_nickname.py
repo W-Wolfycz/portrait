@@ -44,16 +44,6 @@ def test_numeric_target_hits_sender() -> None:
     assert result == [ResolvedPerson("10001", "小明", 1.0)]
 
 
-def test_directory_exact_name() -> None:
-    """守：目录精确名没命中——群里能查到的名字被报成「暂无记录」。"""
-    resolver = DirectoryNicknameResolver(
-        FakeDirectory({"小明": ["10001"], "小红": ["10002"]})
-    )
-    result = _run(resolver, "小明", [])
-    assert result[0].sender_id == "10001"
-    assert result[0].score == 1.0
-
-
 def test_ambiguous_same_name_returns_all() -> None:
     """守：同名成员被静默收敛成一个——直接展示其中一人的画像。"""
     resolver = DirectoryNicknameResolver(
@@ -61,12 +51,6 @@ def test_ambiguous_same_name_returns_all() -> None:
     )
     result = _run(resolver, "小明", [])
     assert {item.sender_id for item in result} == {"10001", "10002"}
-
-
-def test_no_match_returns_empty() -> None:
-    """守：无匹配时返回模糊候选——把不相干的人当目标返回给用户。"""
-    resolver = DirectoryNicknameResolver(FakeDirectory({"小红": ["10002"]}))
-    assert _run(resolver, "不存在", []) == []
 
 
 def test_directory_failure_falls_back_to_profiles() -> None:

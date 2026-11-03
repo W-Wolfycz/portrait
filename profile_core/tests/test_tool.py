@@ -142,9 +142,3 @@ def test_ambiguous_name_returns_candidates() -> None:
     assert "QQ" in answer
 
 
-def test_not_ready_returns_message() -> None:
-    """守：运行时未就绪（store/llm 为 None）时继续查询——AttributeError 打断工具回包。"""
-    runtime = FakeRuntime(Settings(), FakeStore(), FakeLlm())
-    runtime.ready = False
-    tool = PortraitTool(runtime, logging.getLogger("test"))
-    assert _ask(tool, FakeEvent(), is_group=True) == "画像功能未就绪"

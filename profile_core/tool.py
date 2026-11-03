@@ -27,6 +27,22 @@ class PortraitTool:
         assert self._runtime.store is not None
         return RefCatalog(self._runtime.store.list_profile_persons(session))
 
+    async def resolve_person(
+        self, event: Any, target: str
+    ) -> tuple[SessionKey | None, list[Any]]:
+        """按昵称/QQ 解析当前会话人物，供图片渲染复用。"""
+        runtime = self._runtime
+        if runtime.store is None:
+            return None, []
+        session = session_from_event(event)
+        if session is None:
+            return None, []
+        raw_target = (target or "").strip() or str(event.get_sender_id())
+        candidates = runtime.store.list_profile_persons(session)
+        resolver = self._resolver(event, session)
+        resolved = await resolver.resolve(session.key, raw_target, candidates)
+        return session, resolved
+
     async def query(
         self,
         event: Any,

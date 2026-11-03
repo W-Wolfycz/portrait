@@ -73,6 +73,9 @@ data/plugins/portrait/
 ### 命令
 
 - `/portrait status`：查看运行状态、画像数量和待处理内容。
+- `/portrait image`：获取当前群画像或人物画像的图片卡片。
+- `/portrait image person 昵称/QQ`：获取指定人物画像图片。
+- `/portrait image group`：获取当前群画像图片。
 - `/portrait merge`：管理员立即合并一次画像。
 - `/portrait scan`：管理员立即扫描一轮新消息。
 

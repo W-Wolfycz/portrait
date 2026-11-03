@@ -5,7 +5,7 @@ from __future__ import annotations
 from profile_core.profile_schema import coerce_profile
 
 
-def test_flat_person_profile_is_wrapped_into_tiers() -> None:
+def test_flat_profiles_are_wrapped_into_tiers() -> None:
     assert coerce_profile(
         {"identity": "在杭州", "schedule": "凌晨", "recent": "在准备考试"},
         "person",
@@ -14,9 +14,6 @@ def test_flat_person_profile_is_wrapped_into_tiers() -> None:
         "mid": {"schedule": "凌晨"},
         "short": {"recent": "在准备考试"},
     }
-
-
-def test_flat_group_profile_is_wrapped_into_tiers() -> None:
     assert coerce_profile(
         {"theme": "技术", "active_hours": "晚上", "recent": "在聊部署"},
         "group",
@@ -27,15 +24,7 @@ def test_flat_group_profile_is_wrapped_into_tiers() -> None:
     }
 
 
-def test_custom_fields_are_capped_at_thirty_two() -> None:
-    raw = {
-        "long": {f"custom_{index}": "x" for index in range(40)},
-    }
-    result = coerce_profile(raw, "person")
-    assert len(result["long"]) == 32
-
-
-def test_custom_fields_are_kept_and_invalid_keys_dropped() -> None:
+def test_custom_fields_kept_capped_and_invalid_dropped() -> None:
     assert coerce_profile(
         {
             "long": {
@@ -52,3 +41,7 @@ def test_custom_fields_are_kept_and_invalid_keys_dropped() -> None:
         "long": {"identity": "x", "custom_note": "y"},
         "mid": {"relations": "z"},
     }
+    raw = {
+        "long": {f"custom_{index}": "x" for index in range(40)},
+    }
+    assert len(coerce_profile(raw, "person")["long"]) == 32

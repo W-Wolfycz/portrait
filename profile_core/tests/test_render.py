@@ -1,8 +1,4 @@
-"""模板渲染与 P# 标签：不残留内部 token，不把不同人合并。
-
-删掉的是纯文案（[图片]/[上下文] 字样、占位与截断常量）和只看渲染结果就能发现的
-结构问题；留的是 token 协议、残留检测、发言者归并这三类无声错。
-"""
+"""模板渲染与 P# 标签：不残留内部 token，不把不同人合并。"""
 
 from __future__ import annotations
 
@@ -15,8 +11,8 @@ from ._helpers import message
 UTC = RenderOptions(timezone=timezone.utc)
 
 
-def test_at_token_uses_mention_nickname() -> None:
-    """守：CM_AT 索引映射错位——提示词里 @ 到错误的人，画像被算到别人头上。"""
+def test_render_content_token_interop() -> None:
+    """守：CM token 映射/隐藏/还原漂移——画像被算错人或内部标记漏进提示词。"""
     msg = message(
         content="⟦CM_AT:0⟧你好",
         relation={"mentions": [{"user_id": "20001", "nickname": "小明"}]},
@@ -25,18 +21,12 @@ def test_at_token_uses_mention_nickname() -> None:
     assert text == "@小明你好"
     assert unrendered == ()
 
-
-def test_unknown_token_is_hidden_and_reported() -> None:
-    """守：未知 token 漏进提示词——CM 内部标记被当正文喂给 LLM 且无人发现。"""
     msg = message(content="前⟦CM_NEW:0⟧后")
     text, unrendered = render_content(msg, UTC)
     assert "⟦CM_NEW:0⟧" not in text
     assert "[未知消息]" in text
     assert unrendered == ("⟦CM_NEW:0⟧",)
 
-
-def test_sentinel_brackets_are_restored_without_being_counted() -> None:
-    """守：用户原文里的 ⟦…⟧ 没还原成尖括号——正文被改写且被误当成残留 token。"""
     msg = message(content="⦑不是 token⦒")
     text, unrendered = render_content(msg, UTC)
     assert text == "⟦不是 token⟧"

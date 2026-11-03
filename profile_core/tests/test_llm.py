@@ -50,7 +50,7 @@ class FakeContext:
         return FakeResponse(self.text, FakeUsage())
 
 
-def test_uses_default_provider_when_unset() -> None:
+def test_provider_resolution_and_usage() -> None:
     ctx = FakeContext(text="result")
     client = AstrBotLlmClient(ctx, provider_id="")
     result = asyncio.run(
@@ -60,25 +60,21 @@ def test_uses_default_provider_when_unset() -> None:
     assert ctx.kwargs["chat_provider_id"] == "p1"
     assert result.usage["total"] == 6
 
-
-def test_missing_configured_provider_falls_back() -> None:
-    ctx = FakeContext(text="fallback")
-    client = AstrBotLlmClient(ctx, provider_id="missing")
+    fallback = FakeContext(text="fallback")
+    client = AstrBotLlmClient(fallback, provider_id="missing")
     assert asyncio.run(
         client.complete(system_prompt="s", prompt="p")
     ).text == "fallback"
 
 
-def test_timeout_raises() -> None:
+def test_llm_failures_raise_typed_errors() -> None:
     ctx = FakeContext(text="late", delay=0.2)
     client = AstrBotLlmClient(ctx, timeout_seconds=10)
     client._timeout = 0.05
     with pytest.raises(LlmTimeoutError):
         asyncio.run(client.complete(system_prompt="s", prompt="p"))
 
-
-def test_empty_text_raises() -> None:
-    ctx = FakeContext(text="   ")
-    client = AstrBotLlmClient(ctx)
+    empty = FakeContext(text="   ")
+    client = AstrBotLlmClient(empty)
     with pytest.raises(LlmEmptyError):
         asyncio.run(client.complete(system_prompt="s", prompt="p"))

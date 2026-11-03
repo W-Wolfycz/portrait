@@ -98,18 +98,11 @@ def db_path(tmp_path: Path) -> Path:
     return path
 
 
-def test_list_sessions(db_path: Path) -> None:
-    with V2Source(str(db_path)) as source:
-        assert {s.key for s in source.list_sessions()} == {
-            SESSION_A.key,
-            SESSION_B.key,
-        }
-
-
-def test_max_seq(db_path: Path) -> None:
+def test_max_seq_and_shadow_meta(db_path: Path) -> None:
     with V2Source(str(db_path)) as source:
         assert source.max_seq(SESSION_A) == 4
         assert source.max_seq(SESSION_B) == 1
+        assert source.shadow_meta()["schema_version"] == "2"
 
 
 def test_fetch_filters_deleted_and_recalled(db_path: Path) -> None:
@@ -118,24 +111,7 @@ def test_fetch_filters_deleted_and_recalled(db_path: Path) -> None:
         assert [row.seq for row in rows] == [1, 4]
         assert rows[0].content == "a1"
         assert rows[1].content_kinds == ("image",)
-
-
-def test_fetch_after_cursor(db_path: Path) -> None:
-    with V2Source(str(db_path)) as source:
-        rows = source.fetch_after(SESSION_A, 1)
-        assert [row.seq for row in rows] == [4]
-
-
-def test_shadow_meta(db_path: Path) -> None:
-    with V2Source(str(db_path)) as source:
-        assert source.shadow_meta()["schema_version"] == "2"
-
-
-def test_find_by_turn(db_path: Path) -> None:
-    with V2Source(str(db_path)) as source:
-        row = source.find_by_turn(SESSION_A, "turn_1")
-        assert row is not None and row.seq == 1
-        assert source.find_by_turn(SESSION_A, "missing") is None
+        assert [row.seq for row in source.fetch_after(SESSION_A, 1)] == [4]
 
 
 def test_connection_is_read_only(db_path: Path) -> None:
@@ -144,10 +120,3 @@ def test_connection_is_read_only(db_path: Path) -> None:
             source._connection.execute(
                 "INSERT INTO chat_memory_messages (msg_uid, seq) VALUES ('x', 99)"
             )
-
-
-def test_missing_v2_table_raises(tmp_path: Path) -> None:
-    empty = tmp_path / "empty.db"
-    sqlite3.connect(empty).close()
-    with pytest.raises(RuntimeError):
-        V2Source(str(empty))

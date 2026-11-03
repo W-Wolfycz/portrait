@@ -28,12 +28,10 @@ def test_50_text_triggers_threshold() -> None:
     assert plan.counted_text == 50
     assert plan.last_scanned_seq == 50
 
-
-def test_below_threshold_without_daily_flush_does_not_run() -> None:
-    plan = plan_segment(SESSION, _texts(49), 0, policy=POLICY)
-    assert plan.should_run is False
-    assert plan.reason == "below_threshold"
-    assert plan.last_scanned_seq == 0
+    below = plan_segment(SESSION, _texts(49), 0, policy=POLICY)
+    assert below.should_run is False
+    assert below.reason == "below_threshold"
+    assert below.last_scanned_seq == 0
 
 
 def test_daily_flush_runs_below_threshold() -> None:
@@ -44,12 +42,10 @@ def test_daily_flush_runs_below_threshold() -> None:
     assert plan.reason == "daily_flush"
     assert plan.counted_text == 49
 
-
-def test_daily_flush_needs_min_units() -> None:
-    plan = plan_segment(
+    too_small = plan_segment(
         SESSION, _texts(9), 0, policy=POLICY, daily_flush=True
     )
-    assert plan.should_run is False
+    assert too_small.should_run is False
 
 
 def test_non_text_is_skipped_and_cursor_advances() -> None:
@@ -96,7 +92,7 @@ def test_empty_sender_is_ignored() -> None:
     assert plan.counted_text == 0
 
 
-def test_prepend_turn_context_adds_previous_same_group() -> None:
+def test_context_assembly() -> None:
     selected = [message(seq=10, text="answer", group="rg1")]
     before = [
         message(seq=8, text="question", group="rg1"),
@@ -104,15 +100,10 @@ def test_prepend_turn_context_adds_previous_same_group() -> None:
     ]
     padded = prepend_turn_context(selected, before)
     assert [item.seq for item in padded] == [8, 10]
+    assert prepend_turn_context(
+        selected, [message(seq=9, text="other", group="rg2")]
+    ) == selected
 
-
-def test_prepend_turn_context_skips_different_group() -> None:
-    selected = [message(seq=10, text="answer", group="rg1")]
-    before = [message(seq=9, text="other", group="rg2")]
-    assert prepend_turn_context(selected, before) == selected
-
-
-def test_reply_turn_ids_dedupes() -> None:
     messages = [
         message(seq=1, relation={"reply": {"target_turn_id": "t1"}}),
         message(seq=2, relation={"reply": {"target_turn_id": "t1"}}),
@@ -120,10 +111,8 @@ def test_reply_turn_ids_dedupes() -> None:
         message(seq=4),
     ]
     assert reply_turn_ids(messages) == ("t1", "t2")
-
-
-def test_with_reply_context_sorts_and_dedupes() -> None:
-    selected = [message(seq=5, text="a"), message(seq=10, text="b")]
-    targets = [message(seq=2, text="q"), message(seq=5, text="a")]
-    merged = with_reply_context(selected, targets)
+    merged = with_reply_context(
+        [message(seq=5, text="a"), message(seq=10, text="b")],
+        [message(seq=2, text="q"), message(seq=5, text="a")],
+    )
     assert [item.seq for item in merged] == [2, 5, 10]

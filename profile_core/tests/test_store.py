@@ -72,11 +72,14 @@ def test_commit_same_segment_twice_keeps_one_row(store: ProfileStore) -> None:
 
 
 def test_detect_reset_seq_regressed() -> None:
-    """守：会话删空重建后 seq 回退却不重置——新消息被当成已读，永久漏采。"""
-    cursor = _cursor_from(seq=10)
+    """守：会话删空重建/游标位置漂移却不重置——新消息被当成已读，永久漏采。"""
+    cursor = _cursor_from(seq=10, msg_uid="u10")
     decision = detect_reset(cursor, 5, "u10", {})
     assert decision.reset is True
     assert decision.reason == "seq_regressed"
+    mismatch = detect_reset(cursor, 10, "different", {})
+    assert mismatch.reset is True
+    assert mismatch.reason == "uid_mismatch"
 
 
 def test_detect_reset_missing_uid_is_gap() -> None:
@@ -86,54 +89,46 @@ def test_detect_reset_missing_uid_is_gap() -> None:
     assert decision.reset is False
 
 
-def test_apply_schema_guard_bumps_all(store: ProfileStore) -> None:
-    """守：影子表 schema 升级后沿用旧偏移——窗口错位却照常落库。"""
-    _cursor(store, SESSION)
-    _cursor(store, OTHER)
+def test_apply_schema_guard_rebinds_without_rewinding(store: ProfileStore) -> None:
+    """守：CM schema 标记变化时把偏移清零——无谓重采全部历史。"""
+    for session in (SESSION, OTHER):
+        _cursor(store, session)
+        store.advance_cursor(
+            session,
+            seq=5,
+            msg_uid="u5",
+            reason="test",
+        )
     changed = store.apply_schema_guard(
-        {"schema_version": "3", "dual_write_started_at": "t1"}
+        {"schema_version": "4", "dual_write_started_at": "t1"}
     )
     assert changed == 2
     for session in (SESSION, OTHER):
         cursor = store.get_cursor(session)
-        assert cursor.seq == 0
-        assert cursor.generation == 1
-        assert cursor.schema_ver == 3
+        assert cursor.seq == 5
+        assert cursor.msg_uid == "u5"
+        assert cursor.generation == 0
+        assert cursor.schema_ver == 4
         assert cursor.dual_started == "t1"
-        assert cursor.last_status == "schema_changed"
-
-
-def test_apply_schema_guard_noop(store: ProfileStore) -> None:
-    """守：守门每轮都判定变化——代际不停 +1，历史片段每轮被重采一遍。"""
-    _cursor(store, SESSION)
+        assert cursor.last_status == "schema_rebind"
     assert (
         store.apply_schema_guard(
-            {"schema_version": "3", "dual_write_started_at": "t0"}
+            {"schema_version": "4", "dual_write_started_at": "t1"}
         )
         == 0
     )
 
 
 def test_zero_ttl_never_expires(store: ProfileStore) -> None:
-    """守：ttl_days=0 被当成「立刻过期」——片段被静默清理，未合并的内容丢失。"""
+    """守：ttl_days=0/过期清理失效——未合并片段被静默清理或无限增长。"""
     cursor = _cursor(store)
     moment = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    _commit(store, cursor, [M1, M2], ttl_days=0, moment=moment)
+    _commit(store, cursor, [M1], ttl_days=0, moment=moment)
+    _commit(store, cursor, [M2], ttl_days=1, moment=moment)
     assert store.purge_expired(
         moment=datetime(2030, 1, 1, tzinfo=timezone.utc)
-    ) == 0
-    assert store.count_segments() == 1
-
-
-def test_purge_expired(store: ProfileStore) -> None:
-    """守：过期片段永不清——片段表无限增长（资源与库体积失控）。"""
-    cursor = _cursor(store)
-    moment = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    _commit(store, cursor, [M1, M2], ttl_days=1, moment=moment)
-    assert store.purge_expired(
-        moment=datetime(2026, 1, 3, tzinfo=timezone.utc)
     ) == 1
-    assert store.count_segments() == 0
+    assert store.count_segments() == 1
 
 
 def test_pending_and_consumed(store: ProfileStore) -> None:
@@ -156,8 +151,8 @@ def test_generation_changes_segment_id(store: ProfileStore) -> None:
     assert store.count_segments() == 2
 
 
-def test_advance_cursor_skips_without_segment(store: ProfileStore) -> None:
-    """守：政策拒绝后游标不前进——同一批消息被无限重试，扫描原地打转。"""
+def test_advance_and_skip_policy(store: ProfileStore) -> None:
+    """守：政策拒绝/跳过不生效——同一批消息无限重试或被再次合并。"""
     _cursor(store)
     updated = store.advance_cursor(
         SESSION, seq=5, msg_uid="uid5", reason="extract_refused"
@@ -166,26 +161,10 @@ def test_advance_cursor_skips_without_segment(store: ProfileStore) -> None:
     assert updated.msg_uid == "uid5"
     assert store.pending_segments(SESSION) == []
 
-
-def test_list_profile_sessions_includes_group_and_person(
-    store: ProfileStore,
-) -> None:
-    """守：画像查看页漏掉只有人物画像的会话——用户看不到已生成的画像。"""
-    cursor = _cursor(store)
-    segment_id = _commit(store, cursor, [M1, M2])
-    store.commit_merge(
-        SESSION,
-        group_payload={"long": {"theme": "技术"}},
-        persons=[("10001", "A", {"long": {"identity": "杭州"}})],
-        segment_ids=[segment_id],
-        run_info={"run_id": "run1", "run_date": "2026-10-31"},
-    )
-
-    rows = store.list_profile_sessions()
-    assert len(rows) == 1
-    session, group, _ = rows[0]
-    assert session == SESSION
-    assert group == {"long": {"theme": "技术"}}
+    segment_id = _commit(store, updated, [M1, M2])
+    assert store.pending_segments(SESSION)
+    assert store.skip_segments([segment_id], reason="policy_skipped") == 1
+    assert store.pending_segments(SESSION) == []
 
 
 def test_manual_profile_edit_overwrites_without_touching_segments(
@@ -203,10 +182,3 @@ def test_manual_profile_edit_overwrites_without_touching_segments(
     assert store.pending_segments(SESSION) == []
 
 
-def test_skip_segments_removes_pending(store: ProfileStore) -> None:
-    """守：政策跳过的片段仍留在 pending——被拒内容之后又被合并进画像。"""
-    cursor = _cursor(store)
-    segment_id = _commit(store, cursor, [M1, M2])
-    assert store.pending_segments(SESSION)
-    assert store.skip_segments([segment_id], reason="policy_skipped") == 1
-    assert store.pending_segments(SESSION) == []

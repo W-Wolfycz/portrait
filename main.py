@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from jinja2 import Template
+
 from astrbot.api import AstrBotConfig
 from astrbot.api.event import filter
 from astrbot.api.provider import ProviderRequest
@@ -10,14 +12,20 @@ from astrbot.api.web import error_response, json_response, request
 from astrbot.core.agent.message import TextPart
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
 
+from .profile_core.card import (
+    PROFILE_CARD_TEMPLATE,
+    card_data,
+    card_markdown,
+)
 from .profile_core.config import Settings
 from .profile_core.context import build_portrait_context
 from .profile_core.contracts import SessionKey
 from .profile_core.directory import AstrBotDirectory
 from .profile_core.profile_schema import coerce_profile
+from .profile_core.playwright_render import PlaywrightCardRenderer
 from .profile_core.refcodec import RefCatalog, encode_profile, render_profile
 from .profile_core.runtime import Runtime
-from .profile_core.tool import PortraitTool
+from .profile_core.tool import PortraitTool, session_from_event
 
 
 class PortraitPlugin(Star):
@@ -37,6 +45,7 @@ class PortraitPlugin(Star):
         self.runtime: Runtime | None = None
         self.tool: PortraitTool | None = None
         self.directory: AstrBotDirectory | None = None
+        self.card_renderer: PlaywrightCardRenderer | None = None
 
     async def initialize(self) -> None:
         self.runtime = Runtime(
@@ -48,6 +57,9 @@ class PortraitPlugin(Star):
         await self.runtime.start(auto_loop=self.settings.enabled)
         self.tool = PortraitTool(self.runtime, self.logger)
         self.directory = AstrBotDirectory(self.context)
+        self.card_renderer = PlaywrightCardRenderer(
+            self.logger, self.data_dir
+        )
         self.context.register_web_api(
             "/portrait/sessions",
             self.page_sessions,
@@ -349,6 +361,9 @@ class PortraitPlugin(Star):
         )
 
     async def terminate(self) -> None:
+        if self.card_renderer is not None:
+            await self.card_renderer.close()
+            self.card_renderer = None
         if self.runtime is not None:
             await self.runtime.stop()
             self.runtime = None
@@ -384,6 +399,143 @@ class PortraitPlugin(Star):
     @filter.command_group("portrait")
     def portrait_group(self):
         """Portrait 画像管理。"""
+
+    @portrait_group.command("image", alias={"画像"})
+    async def portrait_image(
+        self,
+        event: AstrMessageEvent,
+        scope: str = "",
+        target: str = "",
+    ):
+        """获取当前会话画像图片。
+
+        Args:
+            scope(string): group / person；留空时群聊取群画像、私聊取人物
+            target(string): person 模式的昵称或 QQ；留空为当前发送者
+        """
+        if not self.settings.enabled:
+            yield event.plain_result("画像功能未启用")
+            return
+        if self.runtime is None or self.runtime.store is None:
+            yield event.plain_result("画像功能未就绪")
+            return
+        session = session_from_event(event)
+        if session is None:
+            yield event.plain_result("无法识别当前会话")
+            return
+        if self.settings.is_blacklisted(session):
+            yield event.plain_result("该会话未启用画像")
+            return
+
+        mode = (scope or "").strip().lower()
+        target = (target or "").strip()
+        if mode not in {"group", "person", "群", "人物"}:
+            if mode:
+                target = f"{scope} {target}".strip()
+                mode = "person"
+            else:
+                mode = (
+                    "group"
+                    if session.message_type == "GroupMessage"
+                    else "person"
+                )
+        if mode in {"group", "群"}:
+            if session.message_type != "GroupMessage":
+                yield event.plain_result("私聊没有群画像")
+                return
+            payload = self.runtime.store.get_profile_session(session)
+            if not payload:
+                yield event.plain_result("暂无群画像")
+                return
+            catalog = RefCatalog(
+                self.runtime.store.list_profile_persons(session)
+            )
+            profile = render_profile(payload, catalog, for_llm=False)
+            group_name = ""
+            if self.directory is not None:
+                group_name = (await self.directory.group_names()).get(
+                    session.session_id, ""
+                )
+            data = card_data(
+                title=group_name or "群画像",
+                subtitle=f"群聊 · {session.session_id}",
+                avatar=self._avatar_url(
+                    session.platform_name, session.session_id, group=True
+                ),
+                profile=profile,
+            )
+        else:
+            assert self.tool is not None
+            resolved_session, matches = await self.tool.resolve_person(
+                event, target
+            )
+            if resolved_session is None:
+                yield event.plain_result("无法识别当前会话")
+                return
+            if not matches:
+                yield event.plain_result("暂无人物画像")
+                return
+            if len(matches) > 1:
+                names = [
+                    item.display_name or item.sender_id
+                    for item in matches[:5]
+                ]
+                yield event.plain_result(
+                    f"找到多个：{'、'.join(names)}，请用 QQ 号指定"
+                )
+                return
+            person = matches[0]
+            payload = self.runtime.store.get_profile_person(
+                resolved_session, person.sender_id
+            )
+            if not payload:
+                yield event.plain_result("暂无人物画像")
+                return
+            catalog = RefCatalog(
+                self.runtime.store.list_profile_persons(resolved_session)
+            )
+            profile = render_profile(payload, catalog, for_llm=False)
+            data = card_data(
+                title=person.display_name or person.sender_id,
+                subtitle=f"人物 · {person.sender_id}",
+                avatar=self._avatar_url(
+                    resolved_session.platform_name, person.sender_id
+                ),
+                profile=profile,
+            )
+
+        try:
+            if self.card_renderer is None:
+                raise RuntimeError("Playwright 渲染器未初始化")
+            html = Template(PROFILE_CARD_TEMPLATE).render(**data)
+            path = await self.card_renderer.render(html)
+            yield event.image_result(path)
+        except Exception as exc:
+            self.logger.warning(
+                "画像 Playwright 渲染失败，尝试 Markdown T2I: %s",
+                type(exc).__name__,
+            )
+            try:
+                path = await self.text_to_image(
+                    card_markdown(data),
+                    return_url=False,
+                    umo=event.unified_msg_origin,
+                )
+                yield event.image_result(path)
+                return
+            except Exception as t2i_exc:
+                self.logger.warning(
+                    "画像 Markdown T2I 失败: %s",
+                    type(t2i_exc).__name__,
+                )
+            lines = [data["title"], data["subtitle"]]
+            for section in data["sections"]:
+                lines.append(f"【{section['name']}】")
+                lines.extend(
+                    f"{field['key']}: {field['value']}"
+                    for field in section["fields"]
+                )
+            yield event.plain_result("\n".join(lines))
 
     @portrait_group.command("status")
     async def portrait_status(self, event: AstrMessageEvent):
