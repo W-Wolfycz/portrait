@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from .contracts import SessionKey
+from .freshness import AgeMap, age_suffix
 from .refcodec import RefCatalog, render_profile
-from .store import ProfileStore
+from .store import GROUP_SUBJECT, ProfileStore
 
 _CONTEXT_HEADER = (
     "<portrait_context>\n"
@@ -13,7 +14,11 @@ _CONTEXT_HEADER = (
 )
 
 
-def _tier_lines(profile: dict[str, object]) -> list[str]:
+def _tier_lines(
+    profile: dict[str, object],
+    ages: AgeMap | None = None,
+) -> list[str]:
+    ages = ages or {}
     lines: list[str] = []
     for tier in ("long", "mid", "short"):
         sections = profile.get(tier)
@@ -24,7 +29,8 @@ def _tier_lines(profile: dict[str, object]) -> list[str]:
             text = str(value or "").strip()
             if text:
                 text = text.replace("</portrait_context>", "</portrait_context_>")
-                lines.append(f"- {key}: {text}")
+                suffix = age_suffix(ages.get((tier, str(key)), 0))
+                lines.append(f"- {key}{suffix}: {text}")
     return lines
 
 
@@ -45,14 +51,16 @@ def build_portrait_context(
     if include_group and session.message_type == "GroupMessage":
         group = store.get_profile_session(session) or {}
         rendered = render_profile(group, catalog, for_llm=True)
-        lines = _tier_lines(rendered)
+        lines = _tier_lines(
+            rendered, store.field_ages(session, GROUP_SUBJECT)
+        )
         if lines:
             blocks.append("[群画像]\n" + "\n".join(lines))
 
     if include_person and sender_id:
         person = store.get_profile_person(session, sender_id) or {}
         rendered = render_profile(person, catalog, for_llm=True)
-        lines = _tier_lines(rendered)
+        lines = _tier_lines(rendered, store.field_ages(session, sender_id))
         if lines:
             name = next(
                 (

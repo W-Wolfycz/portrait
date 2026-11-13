@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any
+
+_logger = logging.getLogger(__name__)
 
 TIERS = ("long", "mid", "short")
 
@@ -46,17 +49,25 @@ def normalize_tiered(
         source = raw.get(tier)
         if not isinstance(source, dict):
             continue
-        sections: dict[str, str] = {}
+        valid: list[tuple[str, str]] = []
         for key, value in source.items():
             if not isinstance(key, str) or not _FIELD_RE.match(key):
                 continue
             text = clean_text(value, limit)
             if text:
-                sections[key] = text
-            if len(sections) >= MAX_FIELDS_PER_TIER:
-                break
+                valid.append((key, text))
+        sections = dict(valid[:MAX_FIELDS_PER_TIER])
         if sections:
             result[tier] = sections
+        # 只有「合法字段真的超过上限」才告警：非法键名/空值是正常校验，
+        # 报出来会误导排查方向，也会把日志刷满。
+        if len(valid) > MAX_FIELDS_PER_TIER:
+            _logger.warning(
+                "画像字段超上限被丢弃 tier=%s kept=%d dropped=%d",
+                tier,
+                MAX_FIELDS_PER_TIER,
+                len(valid) - MAX_FIELDS_PER_TIER,
+            )
     return result
 
 

@@ -280,11 +280,17 @@ class V2Source:
         session: SessionKey,
         start_seq: int,
         end_seq: int,
+        *,
+        max_rows: int = 200,
     ) -> list[RawMessage]:
-        """取 ``start_seq <= seq <= end_seq``（升序），用于 turn 对齐/回复闭包。"""
+        """取 ``start_seq <= seq <= end_seq``（升序），用于 turn 对齐/回复闭包。
+
+        ``max_rows`` 默认 200（片段渲染够用）；统计事实需要完整样本时要显式放大，
+        否则 seq 跨度大的片段会被悄悄截断。
+        """
         if end_seq < start_seq:
             return []
-        limit = max(1, min(int(end_seq - start_seq) + 8, 200))
+        limit = max(1, min(int(end_seq - start_seq) + 8, max(1, int(max_rows))))
         select_cols = [
             "msg_uid",
             "seq",

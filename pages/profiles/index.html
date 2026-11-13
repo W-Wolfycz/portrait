@@ -3,15 +3,23 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>群像 · 画像查看</title>
+    <title>群像 · 概览</title>
     <link rel="stylesheet" href="./style.css" />
   </head>
   <body>
     <header class="topbar">
       <div class="brand">
         <h1>群像</h1>
-        <span class="brand-sub">画像查看</span>
+        <span class="brand-sub">画像中枢</span>
       </div>
+      <nav class="viewnav" role="tablist">
+        <button id="nav-dashboard" class="navitem active" type="button" role="tab">
+          概览
+        </button>
+        <button id="nav-profiles" class="navitem" type="button" role="tab">
+          画像
+        </button>
+      </nav>
       <div class="statusbar">
         <span id="status" class="status-chip">加载中…</span>
         <span id="stats" class="stats"></span>
@@ -19,7 +27,13 @@
       </div>
     </header>
 
-    <div class="layout">
+    <main id="view-dashboard" class="view dashboard">
+      <div id="dashboard-body" class="dashboard-body">
+        <p class="empty">加载中…</p>
+      </div>
+    </main>
+
+    <div id="view-profiles" class="view layout" hidden>
       <aside class="sidebar">
         <div class="sidebar-head">
           <div>
@@ -49,7 +63,9 @@
             <div id="drawer-sub" class="muted"></div>
           </div>
           <div class="drawer-actions">
-            <button id="drawer-edit" class="button" type="button">编辑</button>
+            <button id="drawer-versions" class="button" type="button">版本</button>
+            <button id="drawer-delete" class="button danger" type="button">删除</button>
+            <button id="drawer-edit" class="button primary" type="button">编辑</button>
             <button id="drawer-close" class="icon-button" type="button" aria-label="关闭">×</button>
           </div>
         </div>
@@ -75,6 +91,20 @@
             <button id="editor-save" class="button primary" type="button">保存</button>
           </div>
         </footer>
+      </section>
+    </div>
+
+    <div id="versions" class="modal" hidden>
+      <div class="modal-backdrop" data-close="versions"></div>
+      <section class="modal-card" role="dialog" aria-modal="true" aria-labelledby="versions-title">
+        <header class="modal-head">
+          <div>
+            <h2 id="versions-title">版本历史</h2>
+            <p id="versions-sub" class="muted"></p>
+          </div>
+          <button id="versions-close" class="icon-button" type="button" aria-label="关闭">×</button>
+        </header>
+        <div id="versions-body" class="editor-form"></div>
       </section>
     </div>
 

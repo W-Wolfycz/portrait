@@ -389,6 +389,16 @@ CREATE TABLE profile_person (
   PRIMARY KEY (session_key, sender_id)
 );
 
+CREATE TABLE profile_field_meta (
+  session_key  TEXT NOT NULL,
+  subject      TEXT NOT NULL,       -- group 或 sender_id
+  tier         TEXT NOT NULL,
+  field        TEXT NOT NULL,
+  value_hash   TEXT NOT NULL,       -- 判断值有没有变
+  updated_at   TEXT NOT NULL,       -- 该字段内容最后一次变化的时间
+  PRIMARY KEY (session_key, subject, tier, field)
+);
+
 CREATE TABLE merge_run (
   run_id        TEXT PRIMARY KEY,
   run_date      TEXT NOT NULL,      -- 配置时区日期
@@ -398,8 +408,30 @@ CREATE TABLE merge_run (
   status        TEXT NOT NULL,      -- success | partial | failed
   llm_status    TEXT NOT NULL DEFAULT '',
   error         TEXT NOT NULL DEFAULT '',
+  prompt_version TEXT NOT NULL DEFAULT '',
+  usage_json    TEXT NOT NULL DEFAULT '{}',
   started_at    TEXT NOT NULL,
   finished_at   TEXT
+);
+
+-- 覆盖前的画像快照（每 subject 保留最近 20 份，可回滚）
+CREATE TABLE profile_version (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_key  TEXT NOT NULL,
+  subject      TEXT NOT NULL,       -- group 或 sender_id
+  payload_json TEXT NOT NULL,
+  reason       TEXT NOT NULL DEFAULT '',
+  created_at   TEXT NOT NULL
+);
+
+-- 每轮合并的字段级增删改与跨层搬动
+CREATE TABLE merge_diff (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id       TEXT NOT NULL,
+  session_key  TEXT NOT NULL,
+  subject      TEXT NOT NULL,
+  diff_json    TEXT NOT NULL,       -- {added, removed, changed, moved}
+  created_at   TEXT NOT NULL
 );
 
 CREATE TABLE runtime_stat (
@@ -415,6 +447,47 @@ CREATE TABLE runtime_stat (
 - 合并事务：写画像 + 标记片段消费；失败全部回滚，旧画像保留；
 - 人物画像按 `(session, sender_id)` 唯一；`display_name` 存最新昵称；
 - 画像永不自动删除；黑名单保留旧画像。
+
+### 6.1 字段时效（时间信息）
+
+payload 本身不带时间，时效单独存 `profile_field_meta`，只有**字段内容变化**才推进
+`updated_at`；值没变说明这轮没带来新信息（可能压根没人被提到），保持旧时间，避免假新鲜。
+字段消失时同表行一起删。
+
+时间只在两处生效，不写回 payload：
+
+- **注入**：超过 7 天的字段附 `（N 天未更新）`，超过 30 天附 `（N 天未更新，可能已过时）`；
+- **合并**：超过 7 天的字段列进「字段时效」清单，允许模型据此降级（mid→short 或省略）
+  或把反复印证的 mid 升级到 long。
+
+没有时效记录时按旧规则保守保留。首轮同步会把现有字段全部记为「今天」。
+
+### 6.2 统计事实（确定性证据）
+
+合并前用本轮片段覆盖的原始消息算一遍确定性统计（`profile_core/stats.py`），
+作为「统计事实」块附在合并提示词里：每人 24 小时直方图、活跃天数、互动权重。
+
+- 时区一律用插件配置时区换算，不用 UTC 或系统本地时区；
+- 互动判定走邻近规则（同一会话内 180 秒内紧跟他人发言），CM 回复关系只作补充；
+- 统计只作参考事实，取不到消息时返回空串，不影响合并本身。
+
+这样 mid 层的 `schedule` / `relations` 有可核对的数据依据，而不是模型凭印象推断；
+配合 6.1 的时效，形成「什么时候形成的 + 实际发生了什么」两个维度。
+
+### 6.3 安全网：版本、diff、横跳
+
+- **版本快照**：画像被覆盖前留一份 `profile_version`，每 subject 保留最近 20 份，
+  可在页面回滚；回滚本身也走 `save_profile_*`，因此再回滚一次仍可还原；
+- **合并 diff**：`merge_diff` 记录每轮的 added / removed / changed / moved，
+  用来直接看模型改了什么、删了什么；
+- **横跳检测**：字段值翻回上上次的内容时累计 `flip_count`，>=2 视为不稳定字段，
+  健康面板与版本页会列出来。
+
+### 6.4 健康观测
+
+`health_summary()` 聚合待合并积压与最久未合并天数、近两周每日合并成败、
+token 消耗（来自 `merge_run.usage_json`）、字段平均/最大年龄、不稳定字段数，
+经 `/portrait/health` 暴露给页面。
 
 ---
 
@@ -618,14 +691,23 @@ log_with_bot_id            true
 | P6 | QQ 群成员目录昵称解析 | 目录别名精确/子串/模糊、失败降级 | ✅ 已完成 |
 | P7 | 部署端联调 | 手工验收 | 源码已部署，待 reload 验收 |
 
-实现进度（2026-10-29）：
+实现进度（2026-11-13）：
 
-- 插件入口：`main.py`（后台扫描器 + `portrait_query` tool + `portrait status/merge/scan` 命令）；
-- `profile_core/`：`contracts/source/identity/render/segment/nickname/store/extract/merge/llm/prompts/runtime/tool/qqdir/config`；
-- 测试 **57 passed**（读取/渲染/P#/片段/游标/萃取/合并/工具/运行时/上下文补齐/LLM 适配/自适应调度）；
+- 插件入口：`main.py`（后台扫描器 + `portrait_query` tool + `portrait status/segments/me/group/person/delete/restore/merge/scan` 命令）；
+- `profile_core/`：`contracts/source/identity/render/segment/nickname/store/extract/merge/llm/prompts/runtime/tool/qqdir/config/freshness/stats/card/playwright_render`；
+- 测试 **79 passed**（读取/渲染/P#/片段/游标/萃取/合并/工具/运行时/上下文补齐/LLM 适配/自适应调度/字段时效/统计事实/版本与 diff/健康聚合）；
 - 现网库只读验收：500 条渲染、零 `⟦CM_*⟧`、P# 一致、纯图不进片段；
 - 已部署到 `data/plugins/portrait`（不含 docs/tests/cm_pipeline）；
 - 未做：真实 provider 的部署端冒烟（需要 reload 后由用户操作）。
+
+### 待办（已评审，未排期）
+
+- **C 跨会话画像**：同一人在多群各建一份档案，互不知情。计划做人物全局视图、
+  跨群事实流动（A 群确认的身份在 B 群可用并标注来源群），需改存储模型，改动大。
+- **D 注入侧增强**：① 被提及者画像注入（现在只注入群画像 + 当前说话者）；
+  ② 注入预算上限（`context_max_chars` 已移除，长画像可能挤占对话）。
+- **已知架构限制（不在本插件范围）**：`on_llm_request` 在主动消息路径不 fire，
+  画像注入对 cron / 主动消息完全缺席，属 AstrBot core 行为，记录备查。
 
 ---
 

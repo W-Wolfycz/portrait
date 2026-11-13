@@ -97,6 +97,12 @@
     "default": true,
     "hint": "分群建档：按 (session, sender_id) 分别建档。"
   },
+  "refresh_inactive_persons": {
+    "description": "无发言人物自动刷新近期状态",
+    "type": "bool",
+    "default": true,
+    "hint": "每日合并时，即使人物本周期没有发言，也把 short.recent 标为未发言并保留此前状态；中/长期字段不变。"
+  },
   "inject_context": {
     "description": "自动注入画像上下文",
     "type": "bool",

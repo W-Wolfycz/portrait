@@ -11,13 +11,17 @@ from zoneinfo import ZoneInfo
 from .config import Settings
 from .contracts import RawMessage, SessionKey, sha256_hex
 from .extract import SegmentExtractor
+from .freshness import merge_block
 from .llm import AstrBotLlmClient, LlmClient, LlmError
 from .merge import MergeError, ProfileMerger
 from .policy import is_policy_refusal
+from .prompts import PROMPT_VERSION
 from .refcodec import RefCatalog, encode_profile, render_profile
 from .render import RenderOptions, render_segment
 from .source import V2Source
-from .store import ProfileStore, detect_reset, utc_now_iso
+from .stats import activity_summary as stats_summary
+from .stats import format_evidence as stats_evidence
+from .store import GROUP_SUBJECT, ProfileStore, detect_reset, utc_now_iso
 from .segment import (
     SegmentPolicy,
     plan_segment,
@@ -171,6 +175,9 @@ class Runtime:
             try:
                 async with self._lock:
                     processed = await self._scan_once()
+                if self.store is not None:
+                    # 扫描时间落库：扫描停了但合并正常时，只有这个数能看出来。
+                    self.store.set_stat("last_scan_at", utc_now_iso())
                 await self._maybe_merge()
                 if self.store is not None:
                     self.store.purge_expired()
@@ -630,6 +637,77 @@ class Runtime:
             )
             return all(results)
 
+    def _record_merge_failure(
+        self,
+        session: SessionKey,
+        exc: BaseException,
+        *,
+        segment_count: int = 0,
+    ) -> None:
+        """把合并失败落库，供 dashboard 聚合；只存类型名，不存正文。"""
+        if self.store is None:
+            return
+        if isinstance(exc, LlmError):
+            kind = "llm"
+        elif isinstance(exc, MergeError):
+            kind = "merge"
+        else:
+            kind = "unknown"
+        if is_policy_refusal(str(exc)):
+            kind = "policy"
+        try:
+            self.store.record_merge_failure(
+                session,
+                type(exc).__name__,
+                kind=kind,
+                segment_count=segment_count,
+                # 与 merge_run.run_date 同一口径：配置时区自然日。
+                day=datetime.now(self.tz).date().isoformat(),
+            )
+        except Exception as write_exc:
+            self._log(
+                "WARNING",
+                f"合并失败记录写入失败 session={session.key}："
+                f"{type(write_exc).__name__}",
+            )
+
+    def _evidence_block(
+        self,
+        session: SessionKey,
+        segments: list[Any],
+    ) -> str:
+        """取本轮片段覆盖的原始消息，生成确定性统计事实块。
+
+        统计只是给模型的参考事实；取不到消息时返回空串，不影响合并本身。
+        注意：这里是同步 sqlite 读，且 ``source`` 与扫描器共用单连接，
+        调用点必须保持在合并协程内顺序执行，不要并发触发两次合并。
+        """
+        if self.source is None or not segments:
+            return ""
+        try:
+            rows: list[RawMessage] = []
+            for item in segments:
+                # 统计要完整样本：默认 200 行的上限会静默截断 seq 跨度大的片段。
+                rows.extend(
+                    self.source.fetch_by_seq_range(
+                        session,
+                        int(item.start_seq),
+                        int(item.end_seq),
+                        max_rows=5000,
+                    )
+                )
+            if not rows:
+                return ""
+            summary = stats_summary(rows, self.tz)
+            return stats_evidence(summary)
+        except Exception as exc:
+            self._log(
+                "WARNING",
+                f"统计事实生成失败 session={session.key}："
+                f"{type(exc).__name__}",
+            )
+            return ""
+
     async def _merge_session(self, session: SessionKey, date_text: str) -> bool:
         assert self.store is not None
         assert self.merger is not None
@@ -639,20 +717,25 @@ class Runtime:
                 return True
             segment_ids = [item.segment_id for item in pending]
             summaries = [_summary(item.summary_json) for item in pending]
+            evidence = self._evidence_block(session, pending)
             started_at = utc_now_iso()
             try:
                 group_task = asyncio.create_task(
-                    self._merge_group(session, summaries)
+                    self._merge_group(session, summaries, evidence)
                 )
                 persons_task = asyncio.create_task(
-                    self._merge_persons(session, summaries)
+                    self._merge_persons(session, summaries, evidence)
                 )
                 group_payload, persons = await asyncio.gather(
                     group_task, persons_task
                 )
             except (LlmError, MergeError) as exc:
                 advance = self.settings.merge_refusal_advance_segments
-                if is_policy_refusal(str(exc)):
+                refused = is_policy_refusal(str(exc))
+                self._record_merge_failure(
+                    session, exc, segment_count=len(segment_ids)
+                )
+                if refused:
                     if advance > 0:
                         skipped = pending[:advance]
                         self.store.skip_segments(
@@ -707,6 +790,8 @@ class Runtime:
                     "status": "success",
                     "segment_count": len(segment_ids),
                     "person_count": len(persons),
+                    "prompt_version": PROMPT_VERSION,
+                    "usage": self.merger.take_usage(),
                     "started_at": started_at,
                 },
             )
@@ -744,6 +829,7 @@ class Runtime:
         self,
         session: SessionKey,
         summaries: list[dict[str, Any]],
+        evidence: str = "",
     ) -> dict[str, Any] | None:
         assert self.merger is not None
         if not self.settings.enable_group_profile:
@@ -752,6 +838,9 @@ class Runtime:
             return None
         previous = self.store.get_profile_session(session)
         catalog = self._ref_catalog(session, summaries)
+        freshness = merge_block(
+            self.store.field_ages(session, GROUP_SUBJECT)
+        )
         batch_size = self.settings.max_segments_per_merge
         if batch_size <= 0 or len(summaries) <= batch_size:
             fragments = [
@@ -766,7 +855,9 @@ class Runtime:
                 if previous
                 else None
             )
-            merged = await self.merger.merge_group(previous_llm, fragments)
+            merged = await self.merger.merge_group(
+                previous_llm, fragments, freshness, evidence
+            )
             return encode_profile(merged, catalog)
 
         chunks = [
@@ -806,13 +897,36 @@ class Runtime:
             render_profile(item, catalog, for_llm=True)
             for item in batch_profiles
         ]
-        merged = await self.merger.merge_group(previous_llm, final_fragments)
+        merged = await self.merger.merge_group(
+            previous_llm, final_fragments, freshness, evidence
+        )
         return encode_profile(merged, catalog)
+
+    @staticmethod
+    def _refresh_inactive_person(
+        previous: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        """无新片段时只刷新近期状态，中/长期原样保留。"""
+        if not previous:
+            return previous
+        result = dict(previous)
+        short = dict(result.get("short") or {})
+        old = str(short.get("recent") or "").strip()
+        if old.startswith("本周期未发言"):
+            recent = old
+        elif old:
+            recent = f"本周期未发言（此前：{old}）"
+        else:
+            recent = "本周期未发言"
+        short["recent"] = recent[:80]
+        result["short"] = short
+        return result
 
     async def _merge_persons(
         self,
         session: SessionKey,
         summaries: list[dict[str, Any]],
+        evidence: str = "",
     ) -> list[tuple[str, str, dict[str, Any]]]:
         assert self.merger is not None
         if not self.settings.enable_person_profile:
@@ -836,6 +950,30 @@ class Runtime:
                     entry["name"] = name
                 entry["fragments"].append(sections)
 
+        # 没发言的人也要参与本轮刷新：保留旧画像，并更新近期未发言状态。
+        for sender_id, name in self.store.list_profile_persons(session):
+            entry = grouped.setdefault(
+                sender_id, {"name": name, "fragments": []}
+            )
+            if name and not entry["name"]:
+                entry["name"] = name
+
+        # 被提及但没有发言的人，用“群内提及”作为一条近期观察。
+        for summary in summaries:
+            mentioned = summary.get("mentioned")
+            if not isinstance(mentioned, list):
+                continue
+            for item in mentioned:
+                if not isinstance(item, dict):
+                    continue
+                sender_id = catalog.resolve(str(item.get("name") or ""))
+                note = str(item.get("note") or "").strip()
+                if not sender_id or not note or sender_id not in grouped:
+                    continue
+                grouped[sender_id]["fragments"].append(
+                    {"short": {"recent": f"群内提及：{note}"}}
+                )
+
         async def merge_one(
             sender_id: str, entry: dict[str, Any]
         ) -> tuple[str, str, dict[str, Any]]:
@@ -850,8 +988,19 @@ class Runtime:
                 render_profile(item, catalog, for_llm=True)
                 for item in entry["fragments"]
             ]
+            if not fragments:
+                payload = (
+                    self._refresh_inactive_person(previous)
+                    if self.settings.refresh_inactive_persons
+                    else previous
+                )
+                return sender_id, name, encode_profile(payload or {}, catalog)
             payload = await self.merger.merge_person(
-                previous_llm, fragments, name
+                previous_llm,
+                fragments,
+                name,
+                merge_block(self.store.field_ages(session, sender_id)),
+                evidence,
             )
             payload = encode_profile(payload, catalog)
             return sender_id, name, payload
@@ -881,7 +1030,10 @@ class Runtime:
 
     async def scan_now(self) -> int:
         async with self._lock:
-            return await self._scan_once()
+            processed = await self._scan_once()
+        if self.store is not None:
+            self.store.set_stat("last_scan_at", utc_now_iso())
+        return processed
 
     # -- 内部 -----------------------------------------------------------
 

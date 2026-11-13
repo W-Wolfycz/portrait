@@ -26,6 +26,7 @@ from .profile_core.playwright_render import PlaywrightCardRenderer
 from .profile_core.refcodec import RefCatalog, encode_profile, render_profile
 from .profile_core.runtime import Runtime
 from .profile_core.tool import PortraitTool, session_from_event
+from .profile_core.store import GROUP_SUBJECT
 
 
 class PortraitPlugin(Star):
@@ -77,6 +78,30 @@ class PortraitPlugin(Star):
             self.page_update_profile,
             ["POST"],
             "群像：手动修改画像",
+        )
+        self.context.register_web_api(
+            "/portrait/health",
+            self.page_health,
+            ["GET"],
+            "群像：运行健康面板",
+        )
+        self.context.register_web_api(
+            "/portrait/versions",
+            self.page_versions,
+            ["GET"],
+            "群像：画像版本与合并改动",
+        )
+        self.context.register_web_api(
+            "/portrait/restore-version",
+            self.page_restore_version,
+            ["POST"],
+            "群像：回滚画像版本",
+        )
+        self.context.register_web_api(
+            "/portrait/delete-profile",
+            self.page_delete_profile,
+            ["POST"],
+            "群像：删除画像",
         )
 
     @filter.on_llm_request(priority=-200)
@@ -360,6 +385,123 @@ class PortraitPlugin(Star):
             }
         )
 
+    async def page_health(self):
+        """插件页面：运行健康面板（积压、成败、token、字段时效）。"""
+        if self.runtime is None or self.runtime.store is None:
+            return error_response("画像功能未就绪")
+        health = self.runtime.store.health_summary()
+        health["status"] = self.runtime.status()
+        health["settings"] = {
+            "enabled": self.settings.enabled,
+            "inject_context": self.settings.inject_context,
+            "refresh_inactive_persons": self.settings.refresh_inactive_persons,
+        }
+        return json_response(health)
+
+    async def page_versions(self):
+        """插件页面：列出/回滚某个画像的版本，以及最近的合并 diff。"""
+        if self.runtime is None or self.runtime.store is None:
+            return error_response("画像功能未就绪")
+        key = str(request.query.get("session") or "").strip()
+        if not key:
+            return error_response("缺少 session")
+        try:
+            session = SessionKey.parse(key)
+        except ValueError:
+            return error_response("session 格式不正确")
+        subject = str(request.query.get("subject") or "").strip()
+        subject = subject or GROUP_SUBJECT
+        store = self.runtime.store
+        return json_response(
+            {
+                "session": session.key,
+                "subject": subject,
+                "versions": store.list_versions(session, subject),
+                "diffs": store.latest_merge_diff(session, subject),
+                "field_ages": [
+                    {"tier": tier, "field": field, "days": days}
+                    for (tier, field), days in sorted(
+                        store.field_ages(session, subject).items()
+                    )
+                ],
+                "unstable": [
+                    {"tier": tier, "field": field, "flips": flips}
+                    for (tier, field), flips in sorted(
+                        store.field_flips(session, subject).items()
+                    )
+                ],
+            }
+        )
+
+    async def page_restore_version(self):
+        """插件页面：把某个画像回滚到指定版本。"""
+        if self.runtime is None or self.runtime.store is None:
+            return error_response("画像功能未就绪")
+        payload = await request.json(default={})
+        if not isinstance(payload, dict):
+            return error_response("请求格式不正确")
+        key = str(payload.get("session") or "").strip()
+        if not key:
+            return error_response("缺少 session")
+        try:
+            session = SessionKey.parse(key)
+        except ValueError:
+            return error_response("session 格式不正确")
+        subject = str(payload.get("subject") or "").strip() or GROUP_SUBJECT
+        try:
+            version_id = int(payload.get("version_id"))
+        except (TypeError, ValueError):
+            return error_response("version_id 必须是整数")
+        store = self.runtime.store
+        saved = store.get_version_payload(session, subject, version_id)
+        if saved is None:
+            return error_response("没有这个版本")
+        if subject == GROUP_SUBJECT:
+            store.save_profile_session(
+                session, saved, reason=f"restore:{version_id}"
+            )
+        else:
+            name = next(
+                (
+                    display
+                    for sid, display in store.list_profile_persons(session)
+                    if sid == subject
+                ),
+                "",
+            )
+            store.save_profile_person(
+                session, subject, name, saved, reason=f"restore:{version_id}"
+            )
+        return json_response({"restored": True, "version_id": version_id})
+
+    async def page_delete_profile(self):
+        """插件页面：删除群画像或某人物画像。"""
+        if self.runtime is None or self.runtime.store is None:
+            return error_response("画像功能未就绪")
+        payload = await request.json(default={})
+        if not isinstance(payload, dict):
+            return error_response("请求格式不正确")
+        key = str(payload.get("session") or "").strip()
+        if not key:
+            return error_response("缺少 session")
+        try:
+            session = SessionKey.parse(key)
+        except ValueError:
+            return error_response("session 格式不正确")
+        subject = str(payload.get("subject") or "").strip() or GROUP_SUBJECT
+        store = self.runtime.store
+        if subject == GROUP_SUBJECT:
+            removed = store.delete_profile_group(session)
+        else:
+            removed = store.delete_profile_person(session, subject)
+        self.logger.info(
+            "画像删除 session=%s subject=%s removed=%s",
+            session.key,
+            subject,
+            removed,
+        )
+        return json_response({"deleted": bool(removed), "subject": subject})
+
     async def terminate(self) -> None:
         if self.card_renderer is not None:
             await self.card_renderer.close()
@@ -400,18 +542,51 @@ class PortraitPlugin(Star):
     def portrait_group(self):
         """Portrait 画像管理。"""
 
-    @portrait_group.command("image", alias={"画像"})
-    async def portrait_image(
-        self,
-        event: AstrMessageEvent,
-        scope: str = "",
-        target: str = "",
+    @portrait_group.command("segments")
+    async def portrait_segments(
+        self, event: AstrMessageEvent, limit: int = 5
     ):
-        """获取当前会话画像图片。
+        """查看当前会话最近片段摘要（包含已消费片段）。"""
+        if not self.settings.enabled:
+            yield event.plain_result("画像功能未启用")
+            return
+        if self.runtime is None or self.runtime.store is None:
+            yield event.plain_result("画像功能未就绪")
+            return
+        session = session_from_event(event)
+        if session is None:
+            yield event.plain_result("无法识别当前会话")
+            return
+        if self.settings.is_blacklisted(session):
+            yield event.plain_result("该会话未启用画像")
+            return
+        limit = max(1, min(int(limit or 5), 20))
+        rows = self.runtime.store.list_segments(
+            session, include_consumed=True, limit=limit
+        )
+        if not rows:
+            yield event.plain_result("暂无片段")
+            return
+        lines = [f"最近 {len(rows)} 个片段："]
+        for item in rows:
+            state = "已消费" if item.consumed_at else "待合并"
+            lines.append(
+                f"[{item.created_at}] {state} "
+                f"seq {item.start_seq}-{item.end_seq} "
+                f"messages={item.message_count}"
+            )
+            lines.append(item.summary_json[:800])
+            lines.append("")
+        yield event.plain_result("\n".join(lines))
+
+    @portrait_group.command("person")
+    async def portrait_person(
+        self, event: AstrMessageEvent, target: str = ""
+    ):
+        """获取指定人物（默认自己）的画像图片。
 
         Args:
-            scope(string): group / person；留空时群聊取群画像、私聊取人物
-            target(string): person 模式的昵称或 QQ；留空为当前发送者
+            target(string): 昵称或 QQ；留空为当前发送者
         """
         if not self.settings.enabled:
             yield event.plain_result("画像功能未启用")
@@ -426,84 +601,205 @@ class PortraitPlugin(Star):
         if self.settings.is_blacklisted(session):
             yield event.plain_result("该会话未启用画像")
             return
+        assert self.tool is not None
+        resolved_session, matches = await self.tool.resolve_person(
+            event, target
+        )
+        if resolved_session is None:
+            yield event.plain_result("无法识别当前会话")
+            return
+        if not matches:
+            yield event.plain_result("暂无人物画像")
+            return
+        if len(matches) > 1:
+            names = [
+                item.display_name or item.sender_id for item in matches[:5]
+            ]
+            yield event.plain_result(
+                f"找到多个：{'、'.join(names)}，请用 QQ 号指定"
+            )
+            return
+        person = matches[0]
+        payload = self.runtime.store.get_profile_person(
+            resolved_session, person.sender_id
+        )
+        if not payload:
+            yield event.plain_result("暂无人物画像")
+            return
+        catalog = RefCatalog(
+            self.runtime.store.list_profile_persons(resolved_session)
+        )
+        profile = render_profile(payload, catalog, for_llm=False)
+        data = card_data(
+            title=person.display_name or person.sender_id,
+            subtitle=f"人物 · {person.sender_id}",
+            avatar=self._avatar_url(
+                resolved_session.platform_name, person.sender_id
+            ),
+            profile=profile,
+        )
+        async for result in self._profile_card_results(event, data):
+            yield result
 
-        mode = (scope or "").strip().lower()
-        target = (target or "").strip()
-        if mode not in {"group", "person", "群", "人物"}:
-            if mode:
-                target = f"{scope} {target}".strip()
-                mode = "person"
-            else:
-                mode = (
-                    "group"
-                    if session.message_type == "GroupMessage"
-                    else "person"
-                )
-        if mode in {"group", "群"}:
-            if session.message_type != "GroupMessage":
-                yield event.plain_result("私聊没有群画像")
-                return
-            payload = self.runtime.store.get_profile_session(session)
-            if not payload:
-                yield event.plain_result("暂无群画像")
-                return
-            catalog = RefCatalog(
-                self.runtime.store.list_profile_persons(session)
-            )
-            profile = render_profile(payload, catalog, for_llm=False)
-            group_name = ""
-            if self.directory is not None:
-                group_name = (await self.directory.group_names()).get(
-                    session.session_id, ""
-                )
-            data = card_data(
-                title=group_name or "群画像",
-                subtitle=f"群聊 · {session.session_id}",
-                avatar=self._avatar_url(
-                    session.platform_name, session.session_id, group=True
-                ),
-                profile=profile,
-            )
-        else:
-            assert self.tool is not None
-            resolved_session, matches = await self.tool.resolve_person(
-                event, target
-            )
-            if resolved_session is None:
-                yield event.plain_result("无法识别当前会话")
-                return
-            if not matches:
-                yield event.plain_result("暂无人物画像")
-                return
-            if len(matches) > 1:
-                names = [
-                    item.display_name or item.sender_id
-                    for item in matches[:5]
-                ]
-                yield event.plain_result(
-                    f"找到多个：{'、'.join(names)}，请用 QQ 号指定"
-                )
-                return
-            person = matches[0]
-            payload = self.runtime.store.get_profile_person(
-                resolved_session, person.sender_id
-            )
-            if not payload:
-                yield event.plain_result("暂无人物画像")
-                return
-            catalog = RefCatalog(
-                self.runtime.store.list_profile_persons(resolved_session)
-            )
-            profile = render_profile(payload, catalog, for_llm=False)
-            data = card_data(
-                title=person.display_name or person.sender_id,
-                subtitle=f"人物 · {person.sender_id}",
-                avatar=self._avatar_url(
-                    resolved_session.platform_name, person.sender_id
-                ),
-                profile=profile,
-            )
+    @portrait_group.command("delete", alias={"删除画像"})
+    async def portrait_delete(
+        self, event: AstrMessageEvent, target: str = ""
+    ):
+        """删除人物画像或整份群画像（管理员）。
 
+        Args:
+            target(string): 人物昵称/QQ；填 group 删除群画像；留空为自己
+        """
+        if not event.is_admin():
+            yield event.plain_result("仅管理员可删除画像")
+            return
+        if self.runtime is None or self.runtime.store is None:
+            yield event.plain_result("画像功能未就绪")
+            return
+        session = session_from_event(event)
+        if session is None:
+            yield event.plain_result("无法识别当前会话")
+            return
+        text = (target or "").strip()
+        if text.lower() in {"group", "群", "群画像"}:
+            removed = self.runtime.store.delete_profile_group(session)
+            yield event.plain_result(
+                "群画像已删除" if removed else "没有群画像可删"
+            )
+            return
+        assert self.tool is not None
+        resolved_session, matches = await self.tool.resolve_person(event, text)
+        if resolved_session is None or not matches:
+            yield event.plain_result("没有匹配的人物画像")
+            return
+        if len(matches) > 1:
+            names = [
+                item.display_name or item.sender_id for item in matches[:5]
+            ]
+            yield event.plain_result(
+                f"找到多个：{'、'.join(names)}，请用 QQ 号指定"
+            )
+            return
+        person = matches[0]
+        removed = self.runtime.store.delete_profile_person(
+            resolved_session, person.sender_id
+        )
+        if not removed:
+            yield event.plain_result("该人物没有画像")
+            return
+        self.logger.info(
+            "画像已删除 session=%s sender=%s",
+            resolved_session.key,
+            person.sender_id,
+        )
+        yield event.plain_result(
+            f"已删除人物画像：{person.display_name or person.sender_id}"
+        )
+
+    @portrait_group.command("me")
+    async def portrait_me(self, event: AstrMessageEvent):
+        """获取自己的画像图片。"""
+        if not self.settings.enabled:
+            yield event.plain_result("画像功能未启用")
+            return
+        if self.runtime is None or self.runtime.store is None:
+            yield event.plain_result("画像功能未就绪")
+            return
+        session = session_from_event(event)
+        if session is None:
+            yield event.plain_result("无法识别当前会话")
+            return
+        if self.settings.is_blacklisted(session):
+            yield event.plain_result("该会话未启用画像")
+            return
+        assert self.tool is not None
+        resolved_session, matches = await self.tool.resolve_person(event, "")
+        if resolved_session is None:
+            yield event.plain_result("无法识别当前会话")
+            return
+        if not matches:
+            yield event.plain_result("暂无人物画像")
+            return
+        person = matches[0]
+        payload = self.runtime.store.get_profile_person(
+            resolved_session, person.sender_id
+        )
+        if not payload:
+            yield event.plain_result("暂无人物画像")
+            return
+        catalog = RefCatalog(
+            self.runtime.store.list_profile_persons(resolved_session)
+        )
+        profile = render_profile(payload, catalog, for_llm=False)
+        data = card_data(
+            title=person.display_name or person.sender_id,
+            subtitle=f"人物 · {person.sender_id}",
+            avatar=self._avatar_url(
+                resolved_session.platform_name, person.sender_id
+            ),
+            profile=profile,
+        )
+        async for result in self._profile_card_results(event, data):
+            yield result
+
+    @portrait_group.command("group")
+    async def portrait_group_image(self, event: AstrMessageEvent):
+        """获取当前群画像图片。"""
+        if not self.settings.enabled:
+            yield event.plain_result("画像功能未启用")
+            return
+        if self.runtime is None or self.runtime.store is None:
+            yield event.plain_result("画像功能未就绪")
+            return
+        session = session_from_event(event)
+        if session is None:
+            yield event.plain_result("无法识别当前会话")
+            return
+        if session.message_type != "GroupMessage":
+            yield event.plain_result("私聊没有群画像")
+            return
+        if self.settings.is_blacklisted(session):
+            yield event.plain_result("该会话未启用画像")
+            return
+        payload = self.runtime.store.get_profile_session(session)
+        if not payload:
+            yield event.plain_result("暂无群画像")
+            return
+        catalog = RefCatalog(
+            self.runtime.store.list_profile_persons(session)
+        )
+        profile = render_profile(payload, catalog, for_llm=False)
+        group_name = ""
+        if self.directory is not None:
+            group_name = (await self.directory.group_names()).get(
+                session.session_id, ""
+            )
+        data = card_data(
+            title=group_name or "群画像",
+            subtitle=f"群聊 · {session.session_id}",
+            avatar=self._avatar_url(
+                session.platform_name, session.session_id, group=True
+            ),
+            profile=profile,
+        )
+        async for result in self._profile_card_results(event, data):
+            yield result
+
+    @filter.command("画像")
+    async def portrait_me_alias(self, event: AstrMessageEvent):
+        """`/画像`：获取自己的画像图片。"""
+        async for result in self.portrait_me(event):
+            yield result
+
+    @filter.command("群画像")
+    async def portrait_group_alias(self, event: AstrMessageEvent):
+        """`/群画像`：获取当前群画像图片。"""
+        async for result in self.portrait_group_image(event):
+            yield result
+
+    async def _profile_card_results(
+        self, event: AstrMessageEvent, data: dict
+    ):
         try:
             if self.card_renderer is None:
                 raise RuntimeError("Playwright 渲染器未初始化")
@@ -536,6 +832,53 @@ class PortraitPlugin(Star):
                     for field in section["fields"]
                 )
             yield event.plain_result("\n".join(lines))
+
+    @portrait_group.command("restore")
+    async def portrait_restore(
+        self, event: AstrMessageEvent, version_id: str = ""
+    ):
+        """回滚到某个历史版本（管理员）。
+
+        Args:
+            version_id(string): 版本号；留空列出最近版本
+        """
+        if not event.is_admin():
+            yield event.plain_result("仅管理员可回滚画像")
+            return
+        if self.runtime is None or self.runtime.store is None:
+            yield event.plain_result("画像功能未就绪")
+            return
+        session = session_from_event(event)
+        if session is None:
+            yield event.plain_result("无法识别当前会话")
+            return
+        store = self.runtime.store
+        subject = GROUP_SUBJECT
+        versions = store.list_versions(session, subject)
+        text = (version_id or "").strip()
+        if not text:
+            if not versions:
+                yield event.plain_result("暂无历史版本")
+                return
+            lines = ["群画像历史版本："]
+            lines.extend(
+                f"{item['id']} · {item['created_at']} · {item['reason']}"
+                for item in versions[:10]
+            )
+            lines.append("用 /portrait restore 版本号 回滚")
+            yield event.plain_result("\n".join(lines))
+            return
+        try:
+            wanted = int(text)
+        except ValueError:
+            yield event.plain_result("版本号必须是数字")
+            return
+        payload = store.get_version_payload(session, subject, wanted)
+        if payload is None:
+            yield event.plain_result("没有这个版本")
+            return
+        store.save_profile_session(session, payload, reason=f"restore:{wanted}")
+        yield event.plain_result(f"已回滚群画像到版本 {wanted}")
 
     @portrait_group.command("status")
     async def portrait_status(self, event: AstrMessageEvent):

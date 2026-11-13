@@ -98,6 +98,7 @@ class Settings:
 
     enable_group_profile: bool = True
     enable_person_profile: bool = True
+    refresh_inactive_persons: bool = True
     inject_context: bool = True
     blacklist_sessions: tuple[str, ...] = ()
     llm_max_concurrency: int = 4
@@ -142,6 +143,9 @@ class Settings:
             ),
             enable_person_profile=_as_bool(
                 data.get("enable_person_profile"), True
+            ),
+            refresh_inactive_persons=_as_bool(
+                data.get("refresh_inactive_persons"), True
             ),
             inject_context=_as_bool(data.get("inject_context"), True),
             blacklist_sessions=_as_list(data.get("blacklist_sessions")),

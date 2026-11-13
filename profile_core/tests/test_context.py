@@ -22,6 +22,11 @@ class _Store:
     def get_profile_person(self, session: SessionKey, sender_id: str):
         return {"long": {"identity": "学生"}} if sender_id == "10002" else {}
 
+    def field_ages(self, session: SessionKey, subject: str):
+        if subject == "group":
+            return {("short", "recent"): 40}
+        return {}
+
 
 def test_context_renders_tokens_and_person() -> None:
     text = build_portrait_context(_Store(), SESSION, "10002", "小红")
@@ -30,3 +35,9 @@ def test_context_renders_tokens_and_person() -> None:
     assert "[群画像]" in text
     assert "当前说话者画像" in text
     assert "identity: 学生" in text
+
+
+def test_context_marks_stale_fields() -> None:
+    """守：时效标注丢失后，注入里旧结论看起来和刚确认的一样新。"""
+    text = build_portrait_context(_Store(), SESSION, "10002", "小红")
+    assert "recent（40 天未更新，可能已过时）" in text

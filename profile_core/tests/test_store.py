@@ -7,13 +7,13 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
 from profile_core.contracts import Cursor, SessionKey
-from profile_core.store import ProfileStore, detect_reset
+from profile_core.store import ProfileStore, detect_reset, utc_now_iso
 
 from ._helpers import message
 
@@ -131,6 +131,47 @@ def test_zero_ttl_never_expires(store: ProfileStore) -> None:
     assert store.count_segments() == 1
 
 
+def test_consumed_segments_are_retained_for_seven_days(
+    store: ProfileStore,
+) -> None:
+    """守：已消费片段被 TTL 静默删掉——日报/调试失去最近一周摘要。"""
+    cursor = _cursor(store)
+    segment_id = _commit(store, cursor, [M1, M2])
+    store.mark_consumed([segment_id])
+    now = datetime.now(timezone.utc)
+    assert store.purge_expired(moment=now + timedelta(days=1)) == 0
+    assert len(store.list_segments(SESSION)) == 1
+    assert store.purge_expired(moment=now + timedelta(days=8)) == 1
+    assert store.list_segments(SESSION) == []
+
+
+def test_field_meta_only_advances_on_value_change(
+    store: ProfileStore,
+) -> None:
+    """守：值没变也刷新时效——久未印证的中期字段永远显示成刚确认。"""
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    later = base + timedelta(days=30)
+    store.sync_field_meta(
+        SESSION, "10001", {"mid": {"schedule": "晚上活跃"}}, moment=base
+    )
+    store.sync_field_meta(
+        SESSION, "10001", {"mid": {"schedule": "晚上活跃"}}, moment=later
+    )
+    assert store.field_ages(SESSION, "10001", moment=later) == {
+        ("mid", "schedule"): 30
+    }
+
+    store.sync_field_meta(
+        SESSION, "10001", {"mid": {"schedule": "凌晨活跃"}}, moment=later
+    )
+    assert store.field_ages(SESSION, "10001", moment=later) == {
+        ("mid", "schedule"): 0
+    }
+
+    store.sync_field_meta(SESSION, "10001", {}, moment=later)
+    assert store.field_ages(SESSION, "10001", moment=later) == {}
+
+
 def test_pending_and_consumed(store: ProfileStore) -> None:
     """守：消费标记没生效——同一片段每轮被重复合并，画像反复重写。"""
     cursor = _cursor(store)
@@ -180,5 +221,216 @@ def test_manual_profile_edit_overwrites_without_touching_segments(
         "long": {"identity": "手改"}
     }
     assert store.pending_segments(SESSION) == []
+
+
+def test_version_snapshot_is_kept_before_overwrite(
+    store: ProfileStore,
+) -> None:
+    """守：覆盖前不留快照——模型改坏画像后无法回滚，只能手补。"""
+    store.save_profile_person(
+        SESSION, "10001", "甲", {"long": {"identity": "旧"}}
+    )
+    store.save_profile_person(
+        SESSION, "10001", "甲", {"long": {"identity": "新"}}
+    )
+    versions = store.list_versions(SESSION, "10001")
+    assert len(versions) == 1
+    restored = store.get_version_payload(SESSION, "10001", versions[0]["id"])
+    assert restored == {"long": {"identity": "旧"}}
+
+
+def test_merge_diff_records_added_removed_changed(
+    store: ProfileStore,
+) -> None:
+    """守：合并 diff 丢失——看不出模型这一轮删了什么、改了什么。"""
+    store.save_profile_person(
+        SESSION,
+        "10001",
+        "甲",
+        {"mid": {"schedule": "晚上"}, "short": {"recent": "旧"}},
+    )
+    store.commit_merge(
+        SESSION,
+        group_payload=None,
+        persons=[
+            (
+                "10001",
+                "甲",
+                {"mid": {"schedule": "凌晨"}, "long": {"identity": "开发者"}},
+            )
+        ],
+        segment_ids=[],
+        run_info={"run_id": "run1", "run_date": "2026-11-13"},
+    )
+    diffs = store.latest_merge_diff(SESSION, "10001")
+    assert diffs
+    diff = diffs[0]["diff"]
+    assert "long.identity" in diff["added"]
+    assert "short.recent" in diff["removed"]
+    assert diff["changed"]["mid.schedule"]["old"] == "晚上"
+    assert diff["changed"]["mid.schedule"]["new"] == "凌晨"
+
+
+def test_delete_person_removes_meta_versions_and_diff(
+    store: ProfileStore,
+) -> None:
+    """守：删画像后残留时效/版本——幽灵数据继续影响注入与面板。"""
+    store.save_profile_person(
+        SESSION, "10001", "甲", {"long": {"identity": "旧"}}
+    )
+    store.save_profile_person(
+        SESSION, "10001", "甲", {"long": {"identity": "新"}}
+    )
+    assert store.field_ages(SESSION, "10001")
+    assert store.list_versions(SESSION, "10001")
+
+    assert store.delete_profile_person(SESSION, "10001") == 1
+    assert store.get_profile_person(SESSION, "10001") is None
+    assert store.field_ages(SESSION, "10001") == {}
+    assert store.list_versions(SESSION, "10001") == []
+
+
+def test_health_summary_exposes_backlog_and_usage(
+    store: ProfileStore,
+) -> None:
+    """守：健康面板数字错——成本与积压判断失真却没人发现。"""
+    cursor = _cursor(store)
+    _commit(store, cursor, [M1, M2])
+    for run_id, prompt, completion in (
+        ("run-h1", 120, 30),
+        ("run-h2", 80, 20),
+    ):
+        store.commit_merge(
+            SESSION,
+            group_payload={"long": {"theme": run_id}},
+            persons=[],
+            segment_ids=[],
+            run_info={
+                "run_id": run_id,
+                "run_date": "2026-11-13",
+                "usage": {
+                    "prompt_tokens": prompt,
+                    "completion_tokens": completion,
+                },
+            },
+        )
+    health = store.health_summary()
+    assert health["pending_segments"] == 1
+    assert health["profiles"]["sessions"] == 1
+    assert health["field_count"] >= 1
+    assert health["daily"]
+    # 同一天多次合并必须累加，不能只取最后一次。
+    assert health["daily"][0]["runs"] == 2
+    assert health["daily"][0]["prompt_tokens"] == 200
+    assert health["daily"][0]["completion_tokens"] == 50
+
+
+def test_field_flip_detection_marks_unstable_field(
+    store: ProfileStore,
+) -> None:
+    """守：字段反复横跳不被识别——relations 每轮被覆盖，画像来回抖。"""
+    for value in ("好", "差", "好"):
+        store.sync_field_meta(
+            SESSION, "10001", {"mid": {"relations": value}}
+        )
+    # 只翻回一次还不到阈值，先不进不稳定名单。
+    assert store.field_flips(SESSION, "10001") == {}
+
+    store.sync_field_meta(SESSION, "10001", {"mid": {"relations": "差"}})
+    assert store.field_flips(SESSION, "10001") == {("mid", "relations"): 2}
+
+
+def test_merge_diff_is_pruned(store: ProfileStore) -> None:
+    """守：diff 表无上限——每轮合并都累加，长期无限增长。"""
+    keep = store._DIFFS_KEPT
+    for index in range(keep + 5):
+        store.commit_merge(
+            SESSION,
+            group_payload={"long": {"theme": f"t{index}"}},
+            persons=[],
+            segment_ids=[],
+            run_info={"run_id": f"run-{index}", "run_date": "2026-11-13"},
+        )
+    rows = store._connection.execute(
+        "SELECT COUNT(*) FROM merge_diff"
+    ).fetchone()[0]
+    assert rows == keep
+
+
+def test_merge_failure_is_recorded_and_aggregated(
+    store: ProfileStore,
+) -> None:
+    """守：合并失败从不落库——健康面板的「失败」永远是 0，异常被彻底吞掉。"""
+    assert store.health_summary()["failures"]["total"] == 0
+
+    store.record_merge_failure(
+        SESSION, "LlmTimeoutError", kind="llm", segment_count=3, day="2026-11-13"
+    )
+    store.record_merge_failure(
+        SESSION, "LlmTimeoutError", kind="llm", segment_count=2, day="2026-11-13"
+    )
+    store.record_merge_failure(
+        SESSION, "MergeError", kind="policy", segment_count=1, day="2026-11-13"
+    )
+
+    failures = store.health_summary()["failures"]
+    assert failures["total"] == 3
+    by_type = {item["error_type"]: item for item in failures["by_type"]}
+    assert by_type["LlmTimeoutError"]["count"] == 2
+    assert by_type["LlmTimeoutError"]["segments"] == 5
+    assert by_type["MergeError"]["kind"] == "policy"
+    assert failures["recent"][0]["error_type"] == "MergeError"
+
+    # 日趋势里的失败数必须来自失败表，否则永远是 0。
+    daily = store.health_summary()["daily"]
+    assert sum(item["failed"] for item in daily) == 3
+
+
+def test_merge_failure_day_matches_run_date(store: ProfileStore) -> None:
+    """守：失败按 UTC 归日、成功按配置时区归日——跨时区时失败记到前一天。"""
+    # 上海 11-14 01:00 == UTC 11-13 17:00
+    moment = datetime(2026, 11, 13, 17, 0, tzinfo=timezone.utc)
+    store.commit_merge(
+        SESSION,
+        group_payload={"long": {"theme": "x"}},
+        persons=[],
+        segment_ids=[],
+        run_info={"run_id": "r1", "run_date": "2026-11-14"},
+    )
+    store.record_merge_failure(
+        SESSION,
+        "LlmTimeoutError",
+        kind="llm",
+        segment_count=1,
+        day="2026-11-14",
+        moment=moment,
+    )
+    daily = {item["date"]: item for item in store.health_summary()["daily"]}
+    # 失败必须跟成功合并落在同一天，不能多出一条 UTC 日期的假行。
+    assert set(daily) == {"2026-11-14"}
+    assert daily["2026-11-14"]["runs"] == 1
+    assert daily["2026-11-14"]["failed"] == 1
+
+
+def test_merge_failure_table_is_pruned(store: ProfileStore) -> None:
+    """守：失败表无上限——长期运行会无限增长。"""
+    keep = store._FAILURES_KEPT
+    for state in range(keep + 20):
+        store.record_merge_failure(
+            SESSION, f"Err{state}", kind="llm", segment_count=1
+        )
+    rows = store._connection.execute(
+        "SELECT COUNT(*) FROM merge_failure"
+    ).fetchone()[0]
+    assert rows == keep
+
+
+def test_last_scan_at_is_persisted(store: ProfileStore) -> None:
+    """守：扫描时间不落库——扫描停了但合并正常时看不出来。"""
+    assert store.health_summary()["last_scan_age_days"] is None
+    store.set_stat("last_scan_at", utc_now_iso())
+    health = store.health_summary()
+    assert health["last_scan_at"]
+    assert health["last_scan_age_days"] == 0
 
 

@@ -1,6 +1,7 @@
 const bridge = window.AstrBotPluginPage;
 
 const state = {
+  view: "dashboard",
   sessions: [],
   selected: "",
   data: null,
@@ -495,6 +496,18 @@ function renderDetail(data) {
     edit.addEventListener("click", () => openEditor("group"));
     badges.append(edit);
   }
+  if (isGroup && groupHasContent) {
+    const versions = el("button", "button", "版本");
+    versions.type = "button";
+    versions.addEventListener("click", () => openVersions(""));
+    badges.append(versions);
+    const remove = el("button", "button danger", "删除群画像");
+    remove.type = "button";
+    remove.addEventListener("click", () =>
+      deleteProfile("", data.display_name || "群画像")
+    );
+    badges.append(remove);
+  }
   head.append(badges);
   detail.append(head);
 
@@ -922,7 +935,519 @@ async function loadSessions() {
   }
 }
 
-$("refresh").addEventListener("click", loadSessions);
+function switchView(view) {
+  state.view = view;
+  $("view-dashboard").hidden = view !== "dashboard";
+  $("view-profiles").hidden = view !== "profiles";
+  $("nav-dashboard").classList.toggle("active", view === "dashboard");
+  $("nav-profiles").classList.toggle("active", view === "profiles");
+  if (view === "dashboard") {
+    loadDashboard();
+  } else {
+    loadSessions();
+  }
+}
+
+function metricCard(label, value, hint, tone) {
+  const card = el("div", `metric${tone ? " " + tone : ""}`);
+  card.append(el("span", "metric-label", label));
+  card.append(el("strong", "metric-value", String(value)));
+  if (hint) card.append(el("span", "metric-hint", hint));
+  return card;
+}
+
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+function svgEl(tag, attrs = {}) {
+  const node = document.createElementNS(SVG_NS, tag);
+  for (const [key, value] of Object.entries(attrs)) {
+    node.setAttribute(key, String(value));
+  }
+  return node;
+}
+
+function compactNumber(value) {
+  const number = Number(value || 0);
+  if (number >= 1_000_000) return `${(number / 1_000_000).toFixed(1)}m`;
+  if (number >= 1000) return `${(number / 1000).toFixed(1)}k`;
+  return String(Math.round(number));
+}
+
+function legendItem(label, tone) {
+  const item = el("span", "legend-item");
+  item.append(el("i", `legend-dot ${tone}`), el("span", null, label));
+  return item;
+}
+
+function kindLabel(kind) {
+  const map = {
+    llm: "LLM",
+    merge: "合并",
+    policy: "拒绝",
+    unknown: "未知",
+  };
+  return map[kind] || "未知";
+}
+
+function shortSession(key) {
+  const parts = String(key || "").split("|");
+  if (parts.length === 3) {
+    const type = parts[1] === "GroupMessage" ? "群" : "私聊";
+    return `${type} ${parts[2]}`;
+  }
+  return key || "?";
+}
+
+function lineChart(rawRows) {
+  // 后端按日期倒序给，折线要左旧右新。
+  const data = [...rawRows].reverse().map((item) => ({
+    date: String(item.date || ""),
+    runs: Number(item.runs || 0),
+    tokens:
+      Number(item.prompt_tokens || 0) + Number(item.completion_tokens || 0),
+    failed: Number(item.failed || 0),
+  }));
+  const width = 760;
+  const height = 200;
+  const padL = 40;
+  const padR = 46;
+  const padT = 14;
+  const padB = 26;
+  const innerW = width - padL - padR;
+  const innerH = height - padT - padB;
+  const count = data.length;
+  const maxRuns = Math.max(...data.map((item) => item.runs), 1);
+  const maxTokens = Math.max(...data.map((item) => item.tokens), 1);
+  const xAt = (index) =>
+    padL + (count <= 1 ? innerW / 2 : (index * innerW) / (count - 1));
+  const yRuns = (value) => padT + innerH * (1 - value / maxRuns);
+  const yTokens = (value) => padT + innerH * (1 - value / maxTokens);
+
+  const svg = svgEl("svg", {
+    viewBox: `0 0 ${width} ${height}`,
+    class: "linechart",
+    role: "img",
+    "aria-label": "近两周合并趋势",
+  });
+
+  const defs = svgEl("defs");
+  const gradient = svgEl("linearGradient", {
+    id: "portraitTokGrad",
+    x1: "0",
+    y1: "0",
+    x2: "0",
+    y2: "1",
+  });
+  gradient.append(
+    svgEl("stop", { offset: "0%", "stop-color": "#0d9488", "stop-opacity": "0.22" }),
+    svgEl("stop", { offset: "100%", "stop-color": "#0d9488", "stop-opacity": "0" })
+  );
+  defs.append(gradient);
+  svg.append(defs);
+
+  const steps = 4;
+  for (let step = 0; step <= steps; step += 1) {
+    const y = padT + (innerH * step) / steps;
+    svg.append(
+      svgEl("line", { x1: padL, y1: y, x2: width - padR, y2: y, class: "grid" })
+    );
+    const ratio = (steps - step) / steps;
+    const left = svgEl("text", {
+      x: padL - 8,
+      y: y + 3,
+      class: "axis",
+      "text-anchor": "end",
+    });
+    left.textContent = String(Math.round(maxRuns * ratio));
+    svg.append(left);
+    const right = svgEl("text", {
+      x: width - padR + 8,
+      y: y + 3,
+      class: "axis",
+      "text-anchor": "start",
+    });
+    right.textContent = compactNumber(maxTokens * ratio);
+    svg.append(right);
+  }
+
+  const tokenPoints = data.map((item, index) => [
+    xAt(index),
+    yTokens(item.tokens),
+  ]);
+  const runPoints = data.map((item, index) => [xAt(index), yRuns(item.runs)]);
+  const toPath = (points) =>
+    points
+      .map((point, index) => `${index === 0 ? "M" : "L"}${point[0]},${point[1]}`)
+      .join(" ");
+
+  const area = [
+    `M${tokenPoints[0][0]},${padT + innerH}`,
+    ...tokenPoints.map((point) => `L${point[0]},${point[1]}`),
+    `L${tokenPoints[tokenPoints.length - 1][0]},${padT + innerH}`,
+    "Z",
+  ].join(" ");
+  svg.append(svgEl("path", { d: area, class: "area-tokens" }));
+  svg.append(svgEl("path", { d: toPath(tokenPoints), class: "line-tokens" }));
+  svg.append(svgEl("path", { d: toPath(runPoints), class: "line-runs" }));
+
+  data.forEach((item, index) => {
+    const [x, yTok] = tokenPoints[index];
+    const [, yRun] = runPoints[index];
+    const tokenDot = svgEl("circle", {
+      cx: x,
+      cy: yTok,
+      r: 2.6,
+      class: "dot-tokens",
+    });
+    const title = svgEl("title");
+    title.textContent =
+      `${item.date} token ${item.tokens}` +
+      (item.failed ? `，失败 ${item.failed}` : "");
+    tokenDot.append(title);
+    svg.append(tokenDot);
+    svg.append(
+      svgEl("circle", { cx: x, cy: yRun, r: 2.4, class: "dot-runs" })
+    );
+    if (item.failed > 0) {
+      svg.append(
+        svgEl("circle", { cx: x, cy: padT - 6, r: 2.2, class: "dot-failed" })
+      );
+    }
+  });
+
+  const every = count <= 8 ? 1 : Math.ceil(count / 7);
+  data.forEach((item, index) => {
+    if (index % every !== 0 && index !== count - 1) return;
+    const label = svgEl("text", {
+      x: xAt(index),
+      y: height - 8,
+      class: "axis axis-x",
+      "text-anchor": "middle",
+    });
+    label.textContent = item.date.slice(5);
+    svg.append(label);
+  });
+
+  const wrap = el("div", "chart-wrap");
+  wrap.append(svg);
+  return wrap;
+}
+
+function renderDashboard(data) {
+  const body = $("dashboard-body");
+  body.replaceChildren();
+  const status = data.status || {};
+  const profiles = data.profiles || {};
+  const settings = data.settings || {};
+  const ready = Boolean(status.ready);
+
+  const chip = $("status");
+  chip.textContent = ready ? "运行中" : "未就绪";
+  chip.classList.toggle("offline", !ready);
+  const parts = [];
+  if (profiles.sessions != null) parts.push(`会话 ${profiles.sessions}`);
+  if (profiles.persons != null) parts.push(`人物 ${profiles.persons}`);
+  if (status.interval) parts.push(`间隔 ${status.interval}s`);
+  $("stats").textContent = parts.join(" · ");
+
+  const hero = el("section", "hero");
+  const heroMain = el("div", "hero-main");
+  const dot = el("span", `hero-dot${ready ? "" : " off"}`);
+  const scanAt = data.last_scan_at || "";
+  const scanAge = data.last_scan_age_days;
+  const scanText = scanAt
+    ? `最近扫描 ${String(scanAt).slice(0, 10)}` +
+      (Number(scanAge) > 0 ? `（${scanAge} 天前）` : "（今天）")
+    : "尚未扫描";
+  heroMain.append(
+    el("h2", "hero-title", ready ? "画像链路运行中" : "画像链路未就绪")
+  );
+  heroMain.append(
+    el(
+      "p",
+      "hero-sub",
+      [
+        settings.enabled ? "扫描已启用" : "扫描已关闭",
+        settings.inject_context ? "上下文注入开" : "上下文注入关",
+        status.interval ? `间隔 ${status.interval}s` : "",
+        scanText,
+        status.last_merge ? `最近合并 ${status.last_merge}` : "尚未合并过",
+      ]
+        .filter(Boolean)
+        .join(" · ")
+    )
+  );
+  hero.append(dot, heroMain);
+  if (status.error) {
+    hero.append(el("p", "hero-error", `错误：${status.error}`));
+  }
+  body.append(hero);
+
+  const pending = Number(data.pending_segments || 0);
+  const oldest = Number(data.pending_oldest_days || 0);
+  const unstable = Number(data.unstable_fields || 0);
+  const failures = data.failures || {};
+  const failedTotal = Number(failures.total || 0);
+  const cards = el("section", "metric-grid");
+  cards.append(
+    metricCard(
+      "待合并片段",
+      pending,
+      pending ? `最久 ${oldest} 天` : "队列已清空",
+      pending > 50 ? "warn" : ""
+    ),
+    metricCard("会话画像", profiles.sessions ?? 0, "群 / 私聊"),
+    metricCard("人物画像", profiles.persons ?? 0, "分群建档"),
+    metricCard("画像字段", data.field_count ?? 0, "含时效记录"),
+    metricCard(
+      "字段平均年龄",
+      `${data.field_age_avg_days ?? 0} 天`,
+      `最老 ${data.field_age_max_days ?? 0} 天`
+    ),
+    metricCard(
+      "7 天合并失败",
+      failedTotal,
+      failedTotal ? "见下方明细" : "最近无失败",
+      failedTotal ? "warn" : ""
+    ),
+    metricCard(
+      "不稳定字段",
+      unstable,
+      unstable ? "内容反复横跳" : "无明显抖动",
+      unstable ? "warn" : ""
+    )
+  );
+  body.append(cards);
+
+  const daily = Array.isArray(data.daily) ? data.daily : [];
+  const panel = el("section", "panel");
+  const panelHead = el("div", "panel-head");
+  panelHead.append(el("h3", null, "近两周合并"));
+  const legend = el("div", "legend");
+  legend.append(
+    legendItem("合并次数", "blue"),
+    legendItem("token 消耗", "teal")
+  );
+  panelHead.append(legend);
+  panel.append(panelHead);
+  if (!daily.length) {
+    panel.append(
+      el("p", "empty", "还没有合并记录。执行 /portrait merge 或等每日合并后这里会出现趋势。")
+    );
+  } else {
+    panel.append(lineChart(daily.slice(0, 14)));
+  }
+  body.append(panel);
+  body.append(panel);
+
+  const failPanel = el("section", "panel");
+  const failHead = el("div", "panel-head");
+  failHead.append(el("h3", null, "失败明细"));
+  failHead.append(
+    el("span", "muted", `近 ${failures.window_days || 7} 天，按错误类型聚合`)
+  );
+  failPanel.append(failHead);
+  const byType = Array.isArray(failures.by_type) ? failures.by_type : [];
+  if (!byType.length) {
+    failPanel.append(el("p", "empty", "近 7 天没有合并失败。"));
+  } else {
+    const list = el("div", "fail-list");
+    for (const item of byType) {
+      const row = el("div", "fail-row");
+      row.append(el("span", `fail-kind ${item.kind || "unknown"}`, kindLabel(item.kind)));
+      const main = el("div", "fail-main");
+      main.append(el("strong", null, item.error_type || "Unknown"));
+      main.append(
+        el(
+          "span",
+          "muted",
+          `${item.count} 次 · ${item.segments} 个片段 · 最近 ${String(item.last_at || "").slice(0, 16).replace("T", " ")}`
+        )
+      );
+      row.append(main);
+      list.append(row);
+    }
+    failPanel.append(list);
+
+    const recent = Array.isArray(failures.recent) ? failures.recent : [];
+    if (recent.length) {
+      failPanel.append(el("h4", "fail-sub", "最近发生"));
+      const recentList = el("div", "fail-recent");
+      for (const item of recent.slice(0, 5)) {
+        recentList.append(
+          el(
+            "div",
+            "fail-recent-row",
+            `${String(item.created_at || "").slice(5, 16).replace("T", " ")} · ${shortSession(item.session)} · ${item.error_type}`
+          )
+        );
+      }
+      failPanel.append(recentList);
+    }
+  }
+  body.append(failPanel);
+
+  const footnote = el("p", "dashboard-foot");
+  footnote.textContent =
+    "时效从字段最后一次内容变化算起；无发言的人每轮只刷新近期状态，中/长期保持不动。";
+  body.append(footnote);
+}
+
+async function loadDashboard() {
+  const body = $("dashboard-body");
+  if (!body.childElementCount || !body.dataset.ready) {
+    body.replaceChildren(el("p", "empty", "加载中…"));
+  }
+  try {
+    const data = await bridge.apiGet("health");
+    renderDashboard(data);
+    body.dataset.ready = "1";
+  } catch (error) {
+    body.replaceChildren(
+      el("div", "notice", `读取概览失败：${error.message || error}`)
+    );
+  }
+}
+
+async function openVersions(subject) {
+  if (!state.selected) return;
+  const body = $("versions-body");
+  body.replaceChildren(el("p", "empty", "加载中…"));
+  $("versions-sub").textContent = subject
+    ? `subject: ${subject}`
+    : "群画像";
+  $("versions").hidden = false;
+  try {
+    const data = await bridge.apiGet("versions", {
+      session: state.selected,
+      subject: subject || "",
+    });
+    body.replaceChildren();
+
+    const ages = Array.isArray(data.field_ages) ? data.field_ages : [];
+    if (ages.length) {
+      body.append(el("h3", null, "字段时效"));
+      const list = el("div", "health-grid");
+      for (const item of ages) {
+        const cell = el("div", "health-cell");
+        cell.append(
+          el("span", "muted", `${item.tier}.${item.field}`),
+          el("strong", null, `${item.days} 天`)
+        );
+        list.append(cell);
+      }
+      body.append(list);
+    }
+
+    const unstable = Array.isArray(data.unstable) ? data.unstable : [];
+    if (unstable.length) {
+      body.append(el("h3", null, "不稳定字段"));
+      body.append(
+        el(
+          "p",
+          "muted",
+          unstable
+            .map((item) => `${item.tier}.${item.field}（翻 ${item.flips} 次）`)
+            .join("、")
+        )
+      );
+    }
+
+    body.append(el("h3", null, "最近改动"));
+    const diffs = Array.isArray(data.diffs) ? data.diffs : [];
+    if (!diffs.length) {
+      body.append(el("p", "muted", "还没有记录。"));
+    }
+    for (const diff of diffs) {
+      const box = el("div", "diff-box");
+      box.append(el("div", "muted", diff.created_at));
+      for (const [key, value] of Object.entries(diff.diff?.added || {})) {
+        box.append(el("div", "diff-add", `+ ${key}: ${value}`));
+      }
+      for (const [key, value] of Object.entries(diff.diff?.changed || {})) {
+        box.append(
+          el("div", "diff-change", `~ ${key}: ${value.old} → ${value.new}`)
+        );
+      }
+      for (const [key, value] of Object.entries(diff.diff?.removed || {})) {
+        box.append(el("div", "diff-remove", `- ${key}: ${value}`));
+      }
+      for (const [key, value] of Object.entries(diff.diff?.moved || {})) {
+        box.append(el("div", "diff-change", `↕ ${key}: ${value}`));
+      }
+      body.append(box);
+    }
+
+    const versions = Array.isArray(data.versions) ? data.versions : [];
+    body.append(el("h3", null, "历史版本"));
+    if (!versions.length) {
+      body.append(el("p", "muted", "还没有可回滚的版本。"));
+    }
+    for (const version of versions) {
+      const row = el("div", "version-row");
+      row.append(
+        el("span", null, `#${version.id} · ${version.created_at}`),
+        el("span", "muted", version.reason || "")
+      );
+      const button = el("button", "button", "回滚");
+      button.type = "button";
+      button.addEventListener("click", () =>
+        restoreVersion(subject || "", version.id)
+      );
+      row.append(button);
+      body.append(row);
+    }
+  } catch (error) {
+    body.replaceChildren(
+      el("div", "notice", `读取版本失败：${error.message || error}`)
+    );
+  }
+}
+
+function closeVersions() {
+  $("versions").hidden = true;
+}
+
+async function restoreVersion(subject, versionId) {
+  if (!state.selected) return;
+  if (!window.confirm(`回滚到版本 #${versionId}？当前内容会先存成新版本。`)) {
+    return;
+  }
+  try {
+    await bridge.apiPost("restore-version", {
+      session: state.selected,
+      subject: subject || "",
+      version_id: versionId,
+    });
+    closeVersions();
+    await selectSession(state.selected, { keepView: true });
+  } catch (error) {
+    window.alert(`回滚失败：${error.message || error}`);
+  }
+}
+
+async function deleteProfile(subject, label) {
+  if (!state.selected) return;
+  if (!window.confirm(`删除「${label}」的画像？此操作不可撤销。`)) return;
+  try {
+    await bridge.apiPost("delete-profile", {
+      session: state.selected,
+      subject: subject || "",
+    });
+    closeVersions();
+    closeDrawer();
+    await loadSessions();
+  } catch (error) {
+    window.alert(`删除失败：${error.message || error}`);
+  }
+}
+
+$("refresh").addEventListener("click", () => {
+  if (state.view === "dashboard") loadDashboard();
+  else loadSessions();
+});
+$("nav-dashboard").addEventListener("click", () => switchView("dashboard"));
+$("nav-profiles").addEventListener("click", () => switchView("profiles"));
 $("search").addEventListener("input", (event) => {
   state.sessionQuery = event.target.value || "";
   renderSessions();
@@ -930,6 +1455,14 @@ $("search").addEventListener("input", (event) => {
 $("drawer-close").addEventListener("click", closeDrawer);
 $("drawer-edit").addEventListener("click", () => {
   if (state.person) openEditor("person", state.person);
+});
+$("drawer-versions").addEventListener("click", () => {
+  if (state.person) openVersions(state.person.sender_id || "");
+});
+$("drawer-delete").addEventListener("click", () => {
+  if (state.person) {
+    deleteProfile(state.person.sender_id || "", displayName(state.person));
+  }
 });
 $("drawer").addEventListener("click", (event) => {
   if (event.target.dataset.close === "drawer") closeDrawer();
@@ -940,9 +1473,15 @@ $("editor-save").addEventListener("click", saveEditor);
 $("editor").addEventListener("click", (event) => {
   if (event.target.dataset.close === "editor") closeEditor();
 });
+$("versions-close").addEventListener("click", closeVersions);
+$("versions").addEventListener("click", (event) => {
+  if (event.target.dataset.close === "versions") closeVersions();
+});
 document.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
-  if (!$("editor").hidden) {
+  if (!$("versions").hidden) {
+    closeVersions();
+  } else if (!$("editor").hidden) {
     closeEditor();
   } else if (!$("drawer").hidden) {
     closeDrawer();
@@ -950,4 +1489,4 @@ document.addEventListener("keydown", (event) => {
 });
 
 await bridge.ready();
-await loadSessions();
+await switchView("dashboard");
