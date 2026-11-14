@@ -1,5 +1,19 @@
 # 更新日志
 
+## v0.3.1 — 2026-11-15
+
+### 变更
+
+- **指令收敛**：删除 `/portrait scan`（扫描本来就按间隔自动跑）、`/portrait segments`（片段是合并的中间产物，画像页与概览已够用）与 `/portrait restore`（回滚只在页面里做）；保留 `status / me / group / person` 四条只读指令与管理员的 `merge / delete`。
+- **指令权限**：管理员指令改用 `@filter.permission_type(PermissionType.ADMIN)` 声明，不再在函数体里判 `is_admin()`——后者会让 Dashboard 指令管理一直显示 `everyone`，与实际行为不符。
+
+### 修复
+
+- token 统计只认 OpenAI 的 `prompt_tokens/completion_tokens`，而 AstrBot 给的是 `input/output/total`，导致合并消耗恒为 0；统一按 `input/output/total` 解析并兼容旧字段。
+- 萃取阶段的 token 一直落在 `segment.usage_json` 里却没被聚合，面板只显示合并的零头；现按配置时区归日合并进趋势，图例与悬停标注区分「萃取 / 合并」。
+
+测试：84 项通过。
+
 ## v0.3.0 — 2026-11-13
 
 ### 新增

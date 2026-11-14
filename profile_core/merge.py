@@ -32,8 +32,15 @@ class ProfileMerger:
         return usage
 
     def _accumulate(self, usage: dict[str, Any]) -> None:
-        for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+        """累计 token 用量。
+
+        AstrBot 给的是 ``{input, input_cached, output, total}``，不是 OpenAI 的
+        ``prompt_tokens/completion_tokens``；只认后者会让统计恒为 0。
+        """
+        for key in ("input", "output", "total"):
             value = usage.get(key)
+            if isinstance(value, bool):
+                continue
             if isinstance(value, int):
                 self._usage[key] = self._usage.get(key, 0) + value
 

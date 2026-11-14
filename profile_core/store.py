@@ -203,6 +203,45 @@ def _days_since(iso_text: str, now: datetime) -> int:
     return max(0, int((now - then).total_seconds() // 86400))
 
 
+def _usage_totals(usage: Any) -> dict[str, int]:
+    """把各种 usage 形状统一成 ``{input, output, total}``。
+
+    AstrBot 的 ``LlmResult.usage`` 是 ``{input, input_cached, output, total}``；
+    部分 provider 直接给 ``{prompt_tokens, completion_tokens}``。两种都必须认，
+    否则统计会静默变成 0（看起来「没消耗」，实际每轮都在烧）。
+    """
+    data = usage if isinstance(usage, dict) else _json_object(str(usage or "{}"))
+
+    def pick(*keys: str) -> int:
+        for key in keys:
+            value = data.get(key)
+            if isinstance(value, bool):
+                continue
+            if isinstance(value, (int, float)):
+                return int(value)
+        return 0
+
+    prompt = pick("input", "prompt_tokens")
+    completion = pick("output", "completion_tokens")
+    total = pick("total", "total_tokens") or (prompt + completion)
+    return {"input": prompt, "output": completion, "total": total}
+
+
+def _local_day(iso_text: str, tz: Any) -> str:
+    """把 UTC ISO 时间戳转成配置时区的自然日；坏值返回空串。"""
+    try:
+        moment = datetime.fromisoformat(
+            str(iso_text).replace("Z", "+00:00")
+        )
+    except (TypeError, ValueError):
+        return ""
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    if tz is not None:
+        moment = moment.astimezone(tz)
+    return moment.date().isoformat()
+
+
 def _safe_int(value: Any, default: int = 0) -> int:
     try:
         return int(value)
@@ -1113,8 +1152,15 @@ class ProfileStore:
             ],
         }
 
-    def health_summary(self, *, days: int = 14) -> dict[str, Any]:
-        """运行健康聚合：积压、合并成败、token 消耗、字段年龄、失败明细。"""
+    def health_summary(
+        self, *, days: int = 14, tz: Any = None
+    ) -> dict[str, Any]:
+        """运行健康聚合：积压、合并成败、token 消耗、字段年龄、失败明细。
+
+        ``tz`` 是插件配置时区：片段与失败记录存的是 UTC 时间，必须换算成
+        同一个自然日才能和 ``merge_run.run_date`` 对齐，否则 token 与失败会
+        被记到相邻的两天。
+        """
         now = datetime.now(timezone.utc)
         pending_row = self._connection.execute(
             "SELECT COUNT(*) AS n, MIN(created_at) AS oldest "
@@ -1127,16 +1173,37 @@ class ProfileStore:
 
         since = utc_now_iso(now - timedelta(days=max(1, days)))
         rows = self._connection.execute(
-            "SELECT run_date, COUNT(*) AS runs, "
-            "SUM(CASE WHEN status <> 'success' THEN 1 ELSE 0 END) AS failed, "
-            "SUM(segment_count) AS segments, SUM(person_count) AS persons, "
-            "COALESCE(SUM(json_extract(usage_json, '$.prompt_tokens')), 0) AS pt, "
-            "COALESCE(SUM(json_extract(usage_json, '$.completion_tokens')), 0) "
-            "AS ct "
-            "FROM merge_run WHERE finished_at >= ? "
-            "GROUP BY run_date ORDER BY run_date DESC",
+            "SELECT run_date, segment_count, person_count, usage_json "
+            "FROM merge_run WHERE finished_at >= ?",
             (since,),
         ).fetchall()
+        merge_days: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            day = str(row["run_date"] or "")
+            entry = merge_days.setdefault(
+                day,
+                {"runs": 0, "segments": 0, "persons": 0, "input": 0, "output": 0},
+            )
+            entry["runs"] += 1
+            entry["segments"] += int(row["segment_count"] or 0)
+            entry["persons"] += int(row["person_count"] or 0)
+            totals = _usage_totals(row["usage_json"])
+            entry["input"] += totals["input"]
+            entry["output"] += totals["output"]
+        # 萃取 token 存在 segment.usage_json，按配置时区归日。
+        extract_days: dict[str, dict[str, int]] = {}
+        extract_rows = self._connection.execute(
+            "SELECT created_at, usage_json FROM segment WHERE created_at >= ?",
+            (since,),
+        ).fetchall()
+        for row in extract_rows:
+            day = _local_day(str(row["created_at"] or ""), tz)
+            if not day:
+                continue
+            totals = _usage_totals(row["usage_json"])
+            bucket = extract_days.setdefault(day, {"input": 0, "output": 0})
+            bucket["input"] += totals["input"]
+            bucket["output"] += totals["output"]
         # 失败只来自 merge_failure：合并失败从不写 merge_run，
         # 拿 merge_run.status 统计会永远得到 0。
         # 归日优先用 day（配置时区），旧数据回退 UTC 日期。
@@ -1149,30 +1216,57 @@ class ProfileStore:
             str(row["d"] or ""): int(row["n"] or 0) for row in fail_rows
         }
         daily_map: dict[str, dict[str, Any]] = {}
-        for row in rows:
-            day = str(row["run_date"] or "")
+        for day, entry in merge_days.items():
             daily_map[day] = {
                 "date": day,
-                "runs": int(row["runs"] or 0),
+                "runs": entry["runs"],
                 "failed": fail_by_day.get(day, 0),
-                "segments": int(row["segments"] or 0),
-                "persons": int(row["persons"] or 0),
-                "prompt_tokens": int(row["pt"] or 0),
-                "completion_tokens": int(row["ct"] or 0),
+                "segments": entry["segments"],
+                "persons": entry["persons"],
+                "merge_input": entry["input"],
+                "merge_output": entry["output"],
+                "extract_input": 0,
+                "extract_output": 0,
             }
-        # 只有失败没有成功合并的日子，也必须出现在趋势里，否则看不见。
+        for day, bucket in extract_days.items():
+            entry = daily_map.setdefault(
+                day,
+                {
+                    "date": day,
+                    "runs": 0,
+                    "failed": 0,
+                    "segments": 0,
+                    "persons": 0,
+                    "merge_input": 0,
+                    "merge_output": 0,
+                    "extract_input": 0,
+                    "extract_output": 0,
+                },
+            )
+            entry["extract_input"] = bucket["input"]
+            entry["extract_output"] = bucket["output"]
         for day, failed in fail_by_day.items():
-            if day in daily_map:
-                continue
-            daily_map[day] = {
-                "date": day,
-                "runs": 0,
-                "failed": failed,
-                "segments": 0,
-                "persons": 0,
-                "prompt_tokens": 0,
-                "completion_tokens": 0,
-            }
+            entry = daily_map.setdefault(
+                day,
+                {
+                    "date": day,
+                    "runs": 0,
+                    "failed": 0,
+                    "segments": 0,
+                    "persons": 0,
+                    "merge_input": 0,
+                    "merge_output": 0,
+                    "extract_input": 0,
+                    "extract_output": 0,
+                },
+            )
+            entry["failed"] = failed
+        for entry in daily_map.values():
+            # 面板口径：prompt/completion = 萃取 + 合并的合计。
+            entry["prompt_tokens"] = entry["extract_input"] + entry["merge_input"]
+            entry["completion_tokens"] = (
+                entry["extract_output"] + entry["merge_output"]
+            )
         daily = sorted(
             daily_map.values(), key=lambda item: item["date"], reverse=True
         )

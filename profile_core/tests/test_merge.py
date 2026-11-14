@@ -21,6 +21,37 @@ class QueueLlm:
         return LlmResult(self.texts.pop(0), {})
 
 
+class UsageLlm:
+    """返回带 AstrBot 原生 usage 形状的假 provider。"""
+
+    def __init__(self, usage: dict) -> None:
+        self.usage = usage
+        self.calls = 0
+
+    async def complete(self, **kwargs) -> LlmResult:
+        self.calls += 1
+        return LlmResult('{"identity": "x"}', dict(self.usage))
+
+
+def test_merger_accumulates_astrbot_usage() -> None:
+    """守：合并 token 认错字段名——成本面板恒为 0，实际每轮都在烧钱。"""
+    llm = UsageLlm(
+        {"input": 100, "input_cached": 50, "output": 20, "total": 120}
+    )
+    merger = ProfileMerger(llm)
+
+    async def scenario() -> None:
+        await merger.merge_person(None, [{"identity": "a"}], "甲")
+        await merger.merge_person(None, [{"identity": "b"}], "甲")
+
+    asyncio.run(scenario())
+    assert llm.calls == 2
+    usage = merger.take_usage()
+    assert usage == {"input": 200, "output": 40, "total": 240}
+    # 取走后必须清零，否则同一次合并会被重复计入下一轮。
+    assert merger.take_usage() == {}
+
+
 def test_merge_keeps_allowed_fields() -> None:
     group_llm = QueueLlm(
         json.dumps(

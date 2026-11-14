@@ -296,6 +296,8 @@ def test_health_summary_exposes_backlog_and_usage(
     """守：健康面板数字错——成本与积压判断失真却没人发现。"""
     cursor = _cursor(store)
     _commit(store, cursor, [M1, M2])
+    # 用 AstrBot 真实的 usage 形状（input/output/total），
+    # 不是 OpenAI 的 prompt_tokens——否则统计恒为 0 也测不出来。
     for run_id, prompt, completion in (
         ("run-h1", 120, 30),
         ("run-h2", 80, 20),
@@ -309,8 +311,10 @@ def test_health_summary_exposes_backlog_and_usage(
                 "run_id": run_id,
                 "run_date": "2026-11-13",
                 "usage": {
-                    "prompt_tokens": prompt,
-                    "completion_tokens": completion,
+                    "input": prompt,
+                    "input_cached": 0,
+                    "output": completion,
+                    "total": prompt + completion,
                 },
             },
         )
@@ -320,9 +324,50 @@ def test_health_summary_exposes_backlog_and_usage(
     assert health["field_count"] >= 1
     assert health["daily"]
     # 同一天多次合并必须累加，不能只取最后一次。
-    assert health["daily"][0]["runs"] == 2
-    assert health["daily"][0]["prompt_tokens"] == 200
-    assert health["daily"][0]["completion_tokens"] == 50
+    # 按日期取：daily 里还会有「只有萃取、没有合并」的日子。
+    entry = next(
+        item for item in health["daily"] if item["date"] == "2026-11-13"
+    )
+    assert entry["runs"] == 2
+    assert entry["merge_input"] == 200
+    assert entry["merge_output"] == 50
+
+
+def test_extraction_usage_is_aggregated_into_daily_tokens(
+    store: ProfileStore,
+) -> None:
+    """守：萃取 token 不聚合——面板只显示合并的零头，真实成本被藏起来。"""
+    cursor = _cursor(store)
+    store.commit_segment(
+        SESSION,
+        cursor,
+        [M1, M2],
+        '{"ok": true}',
+        usage={"input": 3000, "input_cached": 0, "output": 1200, "total": 4200},
+        cursor_seq=M2.seq,
+        cursor_msg_uid=M2.msg_uid,
+    )
+    base = {"input": 100, "output": 40, "total": 140}
+    store.commit_merge(
+        SESSION,
+        group_payload={"long": {"theme": "t"}},
+        persons=[],
+        segment_ids=[],
+        run_info={
+            "run_id": "run-x",
+            "run_date": utc_now_iso()[:10],
+            "usage": base,
+        },
+    )
+    daily = store.health_summary()["daily"]
+    today = [item for item in daily if item["extract_input"]]
+    assert today, "萃取 token 必须进入日聚合"
+    entry = today[0]
+    # 面板合计 = 萃取 + 合并，两者都要算进去。
+    assert entry["extract_input"] == 3000
+    assert entry["extract_output"] == 1200
+    assert entry["prompt_tokens"] == 3000 + 100
+    assert entry["completion_tokens"] == 1200 + 40
 
 
 def test_field_flip_detection_marks_unstable_field(

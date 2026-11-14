@@ -1102,6 +1102,8 @@ function lineChart(rawRows) {
     const title = svgEl("title");
     title.textContent =
       `${item.date} token ${item.tokens}` +
+      `（萃取 ${(item.extract_input || 0) + (item.extract_output || 0)}` +
+      ` / 合并 ${(item.merge_input || 0) + (item.merge_output || 0)}）` +
       (item.failed ? `，失败 ${item.failed}` : "");
     tokenDot.append(title);
     svg.append(tokenDot);
@@ -1226,7 +1228,7 @@ function renderDashboard(data) {
   const legend = el("div", "legend");
   legend.append(
     legendItem("合并次数", "blue"),
-    legendItem("token 消耗", "teal")
+    legendItem("token（萃取 + 合并）", "teal")
   );
   panelHead.append(legend);
   panel.append(panelHead);

@@ -80,15 +80,20 @@ data/plugins/portrait/
 
 ### 命令
 
-- `/portrait status`：查看运行状态、画像数量和待处理内容。
-- `/portrait segments [N]`：查看当前会话最近片段摘要（含已消费）。
+所有人可用：
+
 - `/portrait me`：获取自己的画像图片；别名 `/画像`。
 - `/portrait group`：获取当前群画像图片；别名 `/群画像`。
 - `/portrait person [昵称/QQ]`：获取指定人物画像图片，留空为自己。
-- `/portrait delete [昵称/QQ|group]`：管理员删除人物画像或整份群画像；别名 `/删除画像`。
-- `/portrait restore [版本号]`：管理员列出/回滚群画像历史版本。
-- `/portrait merge`：管理员立即合并一次画像。
-- `/portrait scan`：管理员立即扫描一轮新消息。
+- `/portrait status`：查看运行状态、画像数量和待处理内容。
+
+仅管理员（`permission_type=admin`，Dashboard 指令管理里可见）：
+
+- `/portrait merge`：立即合并一次画像。
+- `/portrait delete [昵称/QQ|group]`：删除人物画像或整份群画像；别名 `/删除画像`。
+
+扫描按配置间隔自动进行，不单独提供手动指令；运行健康与扫描时间在页面「概览」里看。
+历史版本的回滚只在页面里操作（「画像 → 版本 → 回滚」），不做成聊天指令。
 
 ### 查询工具
 

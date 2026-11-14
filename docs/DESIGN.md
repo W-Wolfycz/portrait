@@ -693,9 +693,10 @@ log_with_bot_id            true
 
 实现进度（2026-11-13）：
 
-- 插件入口：`main.py`（后台扫描器 + `portrait_query` tool + `portrait status/segments/me/group/person/delete/restore/merge/scan` 命令）；
+- 插件入口：`main.py`（后台扫描器 + `portrait_query` tool +
+  `portrait status/me/group/person` 指令，以及管理员用的 `portrait merge/restore/delete`）；
 - `profile_core/`：`contracts/source/identity/render/segment/nickname/store/extract/merge/llm/prompts/runtime/tool/qqdir/config/freshness/stats/card/playwright_render`；
-- 测试 **79 passed**（读取/渲染/P#/片段/游标/萃取/合并/工具/运行时/上下文补齐/LLM 适配/自适应调度/字段时效/统计事实/版本与 diff/健康聚合）；
+- 测试 **84 passed**（读取/渲染/P#/片段/游标/萃取/合并/工具/运行时/上下文补齐/LLM 适配/自适应调度/字段时效/统计事实/版本与 diff/健康聚合）；
 - 现网库只读验收：500 条渲染、零 `⟦CM_*⟧`、P# 一致、纯图不进片段；
 - 已部署到 `data/plugins/portrait`（不含 docs/tests/cm_pipeline）；
 - 未做：真实 provider 的部署端冒烟（需要 reload 后由用户操作）。
@@ -714,6 +715,6 @@ log_with_bot_id            true
 ## 12. 部署后确认
 
 1. 插件 reload 后看日志：`扫描器启动：sessions=...`、片段落库、每日合并；
-2. 用 `/portrait status` 看 counts；用 `/portrait scan`、`/portrait merge` 手动推进；
+2. 用 `/portrait status` 看 counts；需要立即推进时用 `/portrait merge`（管理员）；
 3. 用 tool 问一次群画像 / 人物画像，确认目标解析与回答；
 4. 若要调 `segment_ttl_days`、阈值、合并批次，改配置后 reload。

@@ -389,7 +389,9 @@ class PortraitPlugin(Star):
         """插件页面：运行健康面板（积压、成败、token、字段时效）。"""
         if self.runtime is None or self.runtime.store is None:
             return error_response("画像功能未就绪")
-        health = self.runtime.store.health_summary()
+        health = self.runtime.store.health_summary(
+            tz=self.runtime.tz
+        )
         health["status"] = self.runtime.status()
         health["settings"] = {
             "enabled": self.settings.enabled,
@@ -542,43 +544,6 @@ class PortraitPlugin(Star):
     def portrait_group(self):
         """Portrait 画像管理。"""
 
-    @portrait_group.command("segments")
-    async def portrait_segments(
-        self, event: AstrMessageEvent, limit: int = 5
-    ):
-        """查看当前会话最近片段摘要（包含已消费片段）。"""
-        if not self.settings.enabled:
-            yield event.plain_result("画像功能未启用")
-            return
-        if self.runtime is None or self.runtime.store is None:
-            yield event.plain_result("画像功能未就绪")
-            return
-        session = session_from_event(event)
-        if session is None:
-            yield event.plain_result("无法识别当前会话")
-            return
-        if self.settings.is_blacklisted(session):
-            yield event.plain_result("该会话未启用画像")
-            return
-        limit = max(1, min(int(limit or 5), 20))
-        rows = self.runtime.store.list_segments(
-            session, include_consumed=True, limit=limit
-        )
-        if not rows:
-            yield event.plain_result("暂无片段")
-            return
-        lines = [f"最近 {len(rows)} 个片段："]
-        for item in rows:
-            state = "已消费" if item.consumed_at else "待合并"
-            lines.append(
-                f"[{item.created_at}] {state} "
-                f"seq {item.start_seq}-{item.end_seq} "
-                f"messages={item.message_count}"
-            )
-            lines.append(item.summary_json[:800])
-            lines.append("")
-        yield event.plain_result("\n".join(lines))
-
     @portrait_group.command("person")
     async def portrait_person(
         self, event: AstrMessageEvent, target: str = ""
@@ -641,6 +606,7 @@ class PortraitPlugin(Star):
         async for result in self._profile_card_results(event, data):
             yield result
 
+    @filter.permission_type(filter.PermissionType.ADMIN)
     @portrait_group.command("delete", alias={"删除画像"})
     async def portrait_delete(
         self, event: AstrMessageEvent, target: str = ""
@@ -650,9 +616,6 @@ class PortraitPlugin(Star):
         Args:
             target(string): 人物昵称/QQ；填 group 删除群画像；留空为自己
         """
-        if not event.is_admin():
-            yield event.plain_result("仅管理员可删除画像")
-            return
         if self.runtime is None or self.runtime.store is None:
             yield event.plain_result("画像功能未就绪")
             return
@@ -833,53 +796,6 @@ class PortraitPlugin(Star):
                 )
             yield event.plain_result("\n".join(lines))
 
-    @portrait_group.command("restore")
-    async def portrait_restore(
-        self, event: AstrMessageEvent, version_id: str = ""
-    ):
-        """回滚到某个历史版本（管理员）。
-
-        Args:
-            version_id(string): 版本号；留空列出最近版本
-        """
-        if not event.is_admin():
-            yield event.plain_result("仅管理员可回滚画像")
-            return
-        if self.runtime is None or self.runtime.store is None:
-            yield event.plain_result("画像功能未就绪")
-            return
-        session = session_from_event(event)
-        if session is None:
-            yield event.plain_result("无法识别当前会话")
-            return
-        store = self.runtime.store
-        subject = GROUP_SUBJECT
-        versions = store.list_versions(session, subject)
-        text = (version_id or "").strip()
-        if not text:
-            if not versions:
-                yield event.plain_result("暂无历史版本")
-                return
-            lines = ["群画像历史版本："]
-            lines.extend(
-                f"{item['id']} · {item['created_at']} · {item['reason']}"
-                for item in versions[:10]
-            )
-            lines.append("用 /portrait restore 版本号 回滚")
-            yield event.plain_result("\n".join(lines))
-            return
-        try:
-            wanted = int(text)
-        except ValueError:
-            yield event.plain_result("版本号必须是数字")
-            return
-        payload = store.get_version_payload(session, subject, wanted)
-        if payload is None:
-            yield event.plain_result("没有这个版本")
-            return
-        store.save_profile_session(session, payload, reason=f"restore:{wanted}")
-        yield event.plain_result(f"已回滚群画像到版本 {wanted}")
-
     @portrait_group.command("status")
     async def portrait_status(self, event: AstrMessageEvent):
         """查看扫描器状态与画像数量。"""
@@ -901,12 +817,10 @@ class PortraitPlugin(Star):
             lines.append(f"错误：{status['error']}")
         yield event.plain_result("\n".join(lines))
 
+    @filter.permission_type(filter.PermissionType.ADMIN)
     @portrait_group.command("merge")
     async def portrait_merge(self, event: AstrMessageEvent):
         """管理员手动触发一次合并。"""
-        if not event.is_admin():
-            yield event.plain_result("仅管理员可手动合并")
-            return
         if not self.settings.enabled:
             yield event.plain_result("画像功能未启用")
             return
@@ -915,18 +829,3 @@ class PortraitPlugin(Star):
             return
         ok = await self.runtime.merge_now()
         yield event.plain_result("合并完成" if ok else "合并失败，详见日志")
-
-    @portrait_group.command("scan")
-    async def portrait_scan(self, event: AstrMessageEvent):
-        """管理员手动触发一次扫描。"""
-        if not event.is_admin():
-            yield event.plain_result("仅管理员可手动扫描")
-            return
-        if not self.settings.enabled:
-            yield event.plain_result("画像功能未启用")
-            return
-        if self.runtime is None or not self.runtime.ready:
-            yield event.plain_result("画像功能未就绪")
-            return
-        await self.runtime.scan_now()
-        yield event.plain_result("扫描完成")
